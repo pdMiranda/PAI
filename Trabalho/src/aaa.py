@@ -1,9 +1,9 @@
 """
 Uso:
-python classificar_imagem.py <caminho_para_imagem.nii.gz>
+python aaa.py <caminho_para_imagem.nii.gz>
 
 Exemplo (estando no diretório 'src/'):
-python classificar_imagem.py ../database/axl/OAS2_0001_MR1_axl.nii.gz
+python aaa.py ../database/axl/OAS2_0001_MR1_axl.nii.gz
 """
 
 import os
@@ -274,7 +274,7 @@ def process_single_image(nii_path, oasis_df):
         fig.savefig(seg_path, bbox_inches='tight', pad_inches=0, dpi=100) 
         plt.close(fig) 
         
-        print(f"Imagens intermediárias salvas em '{OUTPUT_DIR}/'")
+        print(f"Imagens salvas em '/{OUTPUT_DIR}'")
 
         # --- 4. Extração de Features ---
         print("Extraindo features")
@@ -335,12 +335,12 @@ def process_single_image(nii_path, oasis_df):
             pred_lr_dem_label = 'Demented' if pred_lr_dem_val == 1 else 'NonDemented'
             pred_xgb_dem_label = 'Demented' if pred_xgb_dem_val == 1 else 'NonDemented'
 
-            print("\n--- Resultados da Classificação (Demência) ---")
+            print("--- Resultados da Classificação (Demência) ---")
             if pd.isna(age):
-                 print(f"Grupo Real: {group} (Idade não disponível para os modelos)")
+                 print(f"Grupo Real:                  {group} (Idade não disponível para os modelos)")
             else:
-                print(f"Grupo Real: {group}")
-            print(f"Predição (Regressão Linear):   {pred_lr_dem_label}")
+                print(f"Grupo Real:                   {group}")
+            print(f"Predição (Regressão Linear):      {pred_lr_dem_label}")
             print(f"Predição (XGBoost):               {pred_xgb_dem_label}")
 
         except FileNotFoundError:
@@ -357,7 +357,7 @@ def process_single_image(nii_path, oasis_df):
             pred_xgb_age = model_xgb_age.predict(X_idade)[0]
 
             print("\n--- Resultados da Regressão (Idade) ---")
-            print(f"Idade Real: {age}")
+            print(f"Idade Real:                       {age}")
             print(f"Idade Predita (Regressão Linear): {pred_lr_age:.2f}")
             print(f"Idade Predita (XGBoost):          {pred_xgb_age:.2f}")
 
