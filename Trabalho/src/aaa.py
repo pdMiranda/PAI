@@ -374,8 +374,8 @@ def process_single_image(nii_path, oasis_df):
 if __name__ == "__main__":   
     if len(sys.argv) < 2:
         print("Erro: Forneça o caminho para a imagem .nii.gz como argumento.")
-        print("Uso: python classificar_imagem.py <caminho_para_imagem.nii.gz>")
-        print("Exemplo (do diretório 'src/'): python classificar_imagem.py ../database/axl/OAS2_0001_MR1_axl.nii.gz")
+        print("Uso: python aaa.py <caminho_para_imagem.nii.gz>")
+        print("Exemplo (do diretório 'src/'): python aaa.py ../database/axl/OAS2_0001_MR1_axl.nii.gz")
         sys.exit(1)
         
     image_path_arg = sys.argv[1]
