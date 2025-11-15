@@ -2,32 +2,36 @@
 import sys
 import os
 import pathlib
-import io # Necessário para o overlay do matplotlib
+import io
 import nibabel as nib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import joblib
 import seaborn as sns
-import cv2 # Importado para a conversão de imagem
+import cv2
 
 # Imports da PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QFrame, QMenu, QMessageBox, QFileDialog,
-    QGroupBox, QTextEdit, QGridLayout, QDialog
+    QGroupBox, QTextEdit, QGridLayout, QDialog,
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 )
-from PySide6.QtGui import QPixmap, QAction, QFont, QImage, QTextCursor
+from PySide6.QtGui import (
+    QPixmap, QAction, QFont, QImage, QTextCursor, 
+    QPainter
+)
 from PySide6.QtCore import Qt, QObject, Signal, Slot
 
-# Imports do Skimage (do aaa.py)
+# Imports do Skimage
 from skimage.morphology import remove_small_objects, binary_opening, disk
 from skimage.measure import label, regionprops
 from scipy.ndimage import binary_fill_holes, distance_transform_edt
 from skimage.filters import threshold_otsu, gaussian
 from skimage.exposure import rescale_intensity, equalize_adapthist
 
-# Imports do Sklearn (do shallow_classifier.ipynb e aaa.py)
+# Imports do Sklearn
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
@@ -37,22 +41,21 @@ from sklearn.linear_model import LogisticRegression, LinearRegression
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, mean_absolute_error, r2_score
 
-# --- CAMINHOS GLOBAIS (Baseado na localização do script) ---
-# Assume que este script está em 'src/'
+# --- CAMINHOS GLOBAIS ---
 BASE_DIR = pathlib.Path(__file__).parent.resolve()
 MODELS_DIR = BASE_DIR / "models"
 OUT_DIR = BASE_DIR / "out"
-DATABASE_DIR = BASE_DIR.parent / "database" # Sobe um nível para 'Trabalho/database'
+DATABASE_DIR = BASE_DIR.parent / "database"
 OASIS_CSV_PATH = DATABASE_DIR / "oasis_longitudinal_demographic.csv"
 
-# --- PARÂMETROS GLOBAIS (do aaa.py) ---
+# --- PARÂMETROS GLOBAIS ---
 N_CLUSTERS = 4
 MIN_AREA_VENTRICLE = 100
 MAX_AREA_VENTRICLE = 15000
 MIN_AREA_BRAIN = 5000
 CENTER_TOLERANCE_RATIO = 0.2
 
-# Colunas esperadas pelos pipelines de predição (do shallow_classifier.ipynb)
+# Colunas esperadas pelos pipelines de predição
 # Pipeline de Demência (LR e XGB)
 COLS_DEMENCIA = [
     'Age', 
@@ -66,7 +69,7 @@ COLS_IDADE = [
     'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength'
 ]
 
-# --- CLASSE PARA REDIRECIONAR O TERMINAL (Request 3) ---
+# --- CLASSE PARA REDIRECIONAR O TERMINAL ---
 class EmittingStream(QObject):
     """
     Classe para redirecionar 'print' (stdout/stderr) para um QObject
@@ -77,11 +80,11 @@ class EmittingStream(QObject):
     def flush(self):
         pass
 
-# --- INÍCIO: LÓGICA DE BACKEND (Extraído dos seus arquivos) ---
+# --- INÍCIO: LÓGICA DE BACKEND ---
 
 def backend_segmentar_ventriculos(image_slice):
     """
-    Lógica de segmentação copiada de 'aaa.py'
+    Lógica de segmentação
     Recebe um slice 2D da imagem e retorna um dict com a máscara e a img pré-processada.
     """
     original_shape = image_slice.shape
@@ -213,7 +216,6 @@ def backend_extract_features(ventricle_mask):
 def backend_load_nii_slice(nii_path):
     """
     Carrega um arquivo .nii.gz ou imagem, extrai o slice central e o ID.
-    (Lógica de 'process_single_image' do 'aaa.py')
     """
     try:
         filename = os.path.basename(nii_path)
@@ -231,7 +233,7 @@ def backend_load_nii_slice(nii_path):
         else:
             raise Exception(f"Dimensionalidade inesperada: {data.ndim}D")
 
-        # Rotaciona para a orientação correta (como em aaa.py)
+        # Rotaciona para a orientação correta
         image_slice_rotacionada = np.rot90(image_slice)
         return image_slice_rotacionada, mri_id
 
@@ -252,12 +254,11 @@ def backend_load_nii_slice(nii_path):
 def backend_get_metadata(mri_id):
     """
     Busca 'Age' e 'Group' no CSV da OASIS.
-    (Lógica de 'process_single_image' do 'aaa.py')
     """
     try:
         df_oasis = pd.read_csv(OASIS_CSV_PATH, sep=';', decimal=',')
         
-        # Limpeza do 'Group' (como em aaa.py e db_split)
+        # Limpeza do 'Group'
         df_oasis['Group'] = df_oasis['Group'].map({
             'Nondemented': 'NonDemented', 
             'Demented': 'Demented', 
@@ -281,7 +282,6 @@ def backend_get_metadata(mri_id):
 def backend_run_prediction(features_dict, metadata_dict):
     """
     Carrega os 4 pipelines (modelos+scalers) e faz a predição.
-    Baseado no 'shallow_classifier.ipynb'
     """
     try:
         # 1. Criar o DataFrame de 1 linha com todas as colunas
@@ -327,12 +327,10 @@ def backend_run_prediction(features_dict, metadata_dict):
 
 def backend_create_contour_overlay(slice_img, mask_img):
     """
-    Usa Matplotlib para criar a imagem de contorno exatamente como
-    o script aaa.py faz, mas salva em bytes.
+    Usa Matplotlib para criar a imagem de contorno
     """
     try:
-        # Normaliza a imagem original para exibição (mesmo que seja float)
-        # CORREÇÃO (Request 1): Normaliza a imagem original ANTES de desenhar
+        # Normaliza a imagem original para exibição
         slice_norm = cv2.normalize(slice_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
         fig, ax = plt.subplots(figsize=(6, 6))
@@ -356,7 +354,7 @@ def backend_create_contour_overlay(slice_img, mask_img):
         return None
 
 
-# --- Funções de Treinamento (do shallow_classifier.ipynb) ---
+# --- Funções de Treinamento Raso ---
 
 def specificity_score(y_true, y_pred):
     cm = confusion_matrix(y_true, y_pred)
@@ -377,7 +375,7 @@ def plot_confusion_matrix_backend(y_true, y_pred, title, filename):
     plt.ylabel('Verdadeiro (Actual)')
     plt.xlabel('Predito (Predicted)')
     plt.savefig(OUT_DIR / f"{filename}.png")
-    plt.close() # Fecha a figura para não consumir memória
+    plt.close()
     print(f"Matriz de confusão salva em {OUT_DIR}/{filename}.png")
 
 def plot_age_scatterplot_backend(y_true, y_pred, title, filename):
@@ -391,7 +389,7 @@ def plot_age_scatterplot_backend(y_true, y_pred, title, filename):
     plt.ylabel('Idade Predita (Predicted Age)')
     plt.grid(True)
     plt.savefig(OUT_DIR / f"{filename}.png")
-    plt.close() # Fecha a figura
+    plt.close()
     print(f"Gráfico de predição de idade salvo em {OUT_DIR}/{filename}.png")
 
 def load_data_set_backend(set_name):
@@ -408,7 +406,7 @@ def load_data_set_backend(set_name):
 
 def backend_run_training():
     """
-    Executa a lógica de treinamento completa do 'shallow_classifier.ipynb'
+    Executa a lógica de treinamento completa do classificador raso
     """
     try:
         print("Iniciando treinamento...")
@@ -510,14 +508,72 @@ def backend_run_training():
         return True
 
     except Exception as e:
-        print(f"Erro durante o treinamento: {e}")
+        print(f"Erro during o treinamento: {e}")
         QMessageBox.critical(None, "Erro no Treinamento", f"Ocorreu uma falha: {e}\n\nVerifique se os arquivos de 'database/treino' e 'database/validacao' existem.")
         return False
 
 # --- FIM: LÓGICA DE BACKEND ---
 
+# Classe auxiliar para visualização de imagem com zoom
+class PhotoViewer(QGraphicsView):
+    """
+    Classe QGraphicsView personalizada para permitir zoom com a roda do mouse
+    e arrastar (pan) com o clique.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(self)
+        self._pixmap_item = QGraphicsPixmapItem()
+        self._scene.addItem(self._pixmap_item)
+        self.setScene(self._scene)
+        
+        # Correção para PySide6
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Permite arrastar
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-# --- INÍCIO: CLASSE DA APLICAÇÃO GUI ---
+    def setPixmap(self, pixmap):
+        self._pixmap_item.setPixmap(pixmap)
+        # NÃO chama fitInView ou scale aqui
+        # O resizeEvent cuidará disso
+    
+    def wheelEvent(self, event):
+        """ Zoom in/out com a roda do mouse """
+        zoom_in_factor = 1.25
+        zoom_out_factor = 1 / zoom_in_factor
+        
+        # Salva a posição da cena sob o mouse
+        old_pos = self.mapToScene(event.position().toPoint())
+        
+        # Zoom
+        if event.angleDelta().y() > 0:
+            scale_factor = zoom_in_factor
+        else:
+            scale_factor = zoom_out_factor
+        
+        self.scale(scale_factor, scale_factor)
+        
+        # Reposiciona a cena para que o ponto sob o mouse permaneça lá
+        new_pos = self.mapToScene(event.position().toPoint())
+        delta = new_pos - old_pos
+        self.translate(delta.x(), delta.y())
+
+    def resizeEvent(self, event):
+        """
+        Chamado quando o widget é redimensionado (incluindo a primeira
+        vez que é exibido após o .exec() do diálogo).
+        """
+        # Ajusta a imagem para caber na nova visualização
+        self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+        # Chama a implementação base
+        super().resizeEvent(event)
+
+# --- APLICAÇÃO GUI ---
 
 class ImageProcessingApp(QMainWindow):
     def __init__(self):
@@ -534,6 +590,11 @@ class ImageProcessingApp(QMainWindow):
 
         # --- Variáveis de estado ---
         self.caminho_imagem_original = None
+        
+        # Armazena os pixmaps em alta resolução para o diálogo de zoom
+        self.full_pixmap_original = None
+        self.full_pixmap_processada = None
+        self.full_pixmap_segmentada = None
         
         # --- Layout Principal ---
         widget_central = QWidget()
@@ -566,7 +627,7 @@ class ImageProcessingApp(QMainWindow):
         
         layout_conteudo.addLayout(layout_imagens, stretch=3)
 
-        # --- *** MUDANÇA 3: Painel Inferior Dividido (Features + Terminal) *** ---
+        # 3. Painel Inferior Dividido (Features + Terminal)
         layout_inferior = QHBoxLayout()
         
         # 3.1. Lado Esquerdo: Features
@@ -596,7 +657,6 @@ class ImageProcessingApp(QMainWindow):
         widget_inferior.setFixedHeight(200) # Altura fixa para a área
         
         layout_principal.addWidget(widget_inferior)
-        # --- Fim da Mudança 3 ---
 
         # --- Redirecionamento do stdout/stderr para o terminal ---
         sys.stdout = EmittingStream(textWritten=self.atualizar_terminal)
@@ -605,9 +665,9 @@ class ImageProcessingApp(QMainWindow):
         print("Interface iniciada. Selecione uma imagem para começar.")
 
         # --- Adicionando funcionalidade de zoom nas imagens ---
-        self.label_img_original.mousePressEvent = lambda event: self.abrir_imagem_em_dialogo(self.label_img_original.pixmap())
-        self.label_img_processada.mousePressEvent = lambda event: self.abrir_imagem_em_dialogo(self.label_img_processada.pixmap())
-        self.label_img_segmentada.mousePressEvent = lambda event: self.abrir_imagem_em_dialogo(self.label_img_segmentada.pixmap())
+        self.label_img_original.mousePressEvent = lambda event: self.abrir_imagem_em_dialogo(self.full_pixmap_original)
+        self.label_img_processada.mousePressEvent = lambda event: self.abrir_imagem_em_dialogo(self.full_pixmap_processada)
+        self.label_img_segmentada.mousePressEvent = lambda event: self.abrir_imagem_em_dialogo(self.full_pixmap_segmentada)
 
     @Slot(str)
     def atualizar_terminal(self, text):
@@ -667,17 +727,26 @@ class ImageProcessingApp(QMainWindow):
         layout_superior.addLayout(layout_botoes)
         layout_superior.addStretch(1) 
 
-        # --- *** MUDANÇA 2: Layout de Predições Compacto *** ---
-        grupo_predicoes = QGroupBox("Predição Raso")
-        layout_predicoes = QHBoxLayout(grupo_predicoes) 
+        # --- Layout de Predição (com Título à Esquerda) ---
         
+        # 1. Layout "wrapper" para o título e a caixa
+        layout_pred_wrapper = QHBoxLayout()
+
+        # 2. Adiciona o Título à esquerda
         font_pred = QFont()
         font_pred.setPointSize(9) # Fonte bem pequena
+        label_titulo_pred = QLabel("<b>Predição Raso:</b>")
+        label_titulo_pred.setFont(font_pred)
+        layout_pred_wrapper.addWidget(label_titulo_pred)
 
+        # 3. Cria o QGroupBox sem título (apenas para a borda)
+        grupo_predicoes = QGroupBox("")
+        layout_predicoes = QHBoxLayout(grupo_predicoes) 
+        
         # Estilo para os labels de resultado
         style_label_pred = "color: #00008B; font-weight: bold;"
 
-        # --- Labels ---
+        # --- Labels de resultado ---
         self.label_pred_idade_xgb = QLabel("N/A")
         self.label_pred_demencia_xgb = QLabel("N/A")
         self.label_pred_idade_xgb.setFont(font_pred)
@@ -692,35 +761,44 @@ class ImageProcessingApp(QMainWindow):
         self.label_pred_idade_lr.setStyleSheet(style_label_pred)
         self.label_pred_demencia_lr.setStyleSheet(style_label_pred)
 
-        # Separadores
-        v_line1 = QFrame()
-        v_line1.setFrameShape(QFrame.Shape.VLine)
-        v_line1.setFrameShadow(QFrame.Shadow.Sunken)
-        
-        v_line2 = QFrame()
-        v_line2.setFrameShape(QFrame.Shape.VLine)
-        v_line2.setFrameShadow(QFrame.Shadow.Sunken)
-        
-        # Adiciona os widgets no layout
-        
-        label_xgb = QLabel("<b>XGB:</b>")
-        label_xgb.setFont(font_pred)
-        layout_predicoes.addWidget(label_xgb)
-        layout_predicoes.addWidget(self.label_pred_idade_xgb)
-        layout_predicoes.addWidget(self.label_pred_demencia_xgb)
-        
-        layout_predicoes.addWidget(v_line1) # Separador
-        
-        label_lr = QLabel("<b>Linear:</b>")
-        label_lr.setFont(font_pred)
-        layout_predicoes.addWidget(label_lr)
-        layout_predicoes.addWidget(self.label_pred_idade_lr)
-        layout_predicoes.addWidget(self.label_pred_demencia_lr)
-        
-        layout_predicoes.setSpacing(5) # Espaçamento menor
-        # --- Fim da Mudança 2 ---
+        # --- Labels de formatação (parênteses, etc) ---
+        label_xgb_open = QLabel("<b>XGB</b> (")
+        label_xgb_open.setFont(font_pred)
+        label_xgb_sep = QLabel("|")
+        label_xgb_sep.setFont(font_pred)
+        label_xgb_close = QLabel(")")
+        label_xgb_close.setFont(font_pred)
 
-        layout_superior.addWidget(grupo_predicoes)
+        label_lr_open = QLabel("<b>Linear</b> (")
+        label_lr_open.setFont(font_pred)
+        label_lr_sep = QLabel("|")
+        label_lr_sep.setFont(font_pred)
+        label_lr_close = QLabel(")")
+        label_lr_close.setFont(font_pred)
+
+        # 4. Adiciona os widgets ao layout *interno* (layout_predicoes)
+        layout_predicoes.addWidget(label_xgb_open)
+        layout_predicoes.addWidget(self.label_pred_idade_xgb)
+        layout_predicoes.addWidget(label_xgb_sep)
+        layout_predicoes.addWidget(self.label_pred_demencia_xgb)
+        layout_predicoes.addWidget(label_xgb_close)
+        
+        layout_predicoes.addSpacing(10) # Pequeno espaço entre os grupos
+
+        layout_predicoes.addWidget(label_lr_open)
+        layout_predicoes.addWidget(self.label_pred_idade_lr)
+        layout_predicoes.addWidget(label_lr_sep)
+        layout_predicoes.addWidget(self.label_pred_demencia_lr)
+        layout_predicoes.addWidget(label_lr_close)
+        
+        layout_predicoes.setSpacing(3) # Espaçamento bem justo
+        
+        # 5. Adiciona o GroupBox (com os resultados) ao wrapper
+        layout_pred_wrapper.addWidget(grupo_predicoes)
+        
+        # 6. Adiciona o wrapper (Título + Caixa) ao layout superior
+        layout_superior.addLayout(layout_pred_wrapper)
+        
         return layout_superior
 
     def selecionar_imagem(self):
@@ -815,7 +893,6 @@ class ImageProcessingApp(QMainWindow):
                 pixmap.loadFromData(imagem_data)
 
             elif hasattr(imagem_data, 'shape'): # É NumPy array
-                # --- CORREÇÃO IMAGEM BRILHANTE (Request 1) ---
                 # Garante que dados 2D (grayscale) sejam normalizados para 0-255 uint8
                 if len(imagem_data.shape) == 2:
                     if imagem_data.dtype != np.uint8:
@@ -835,6 +912,17 @@ class ImageProcessingApp(QMainWindow):
                 
                 if q_image:
                     pixmap = QPixmap.fromImage(q_image)
+
+            # Armazena o pixmap original (em alta resolução) antes de escalar
+            # para ser usado no diálogo de zoom.
+            # Fazemos uma cópia para evitar problemas de referência
+            temp_pixmap = pixmap.copy()
+            if label == self.label_img_original:
+                self.full_pixmap_original = temp_pixmap
+            elif label == self.label_img_processada:
+                self.full_pixmap_processada = temp_pixmap
+            elif label == self.label_img_segmentada:
+                self.full_pixmap_segmentada = temp_pixmap
 
             if pixmap and not pixmap.isNull():
                 label.setPixmap(pixmap.scaled(
@@ -907,19 +995,23 @@ class ImageProcessingApp(QMainWindow):
 
     def abrir_imagem_em_dialogo(self, pixmap):
         """
-        Abre a imagem em um diálogo para permitir zoom.
+        Abre a imagem em um diálogo com QGraphicsView para permitir zoom.
+        Recebe o PIXMAP DE ALTA RESOLUÇÃO.
         """
         if pixmap is None or pixmap.isNull():
-            QMessageBox.warning(self, "Erro", "Nenhuma imagem para exibir.")
+            # Ação de clique antes da primeira imagem ser carregada
+            QMessageBox.warning(self, "Erro", "Nenhuma imagem para exibir. Carregue uma imagem primeiro.")
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Visualizar Imagem")
+        dialog.setWindowTitle("Visualizar Imagem (Role para Zoom, Arraste para Mover)")
         layout = QVBoxLayout()
 
-        label = QLabel()
-        label.setPixmap(pixmap)
-        layout.addWidget(label)
+        # Substitui QLabel por PhotoViewer
+        viewer = PhotoViewer(self)
+        viewer.setPixmap(pixmap) # Passa o pixmap de alta resolução
+        viewer.setMinimumSize(600, 600) # Define um tamanho inicial razoável
+        layout.addWidget(viewer)
 
         btn_fechar = QPushButton("Fechar")
         btn_fechar.clicked.connect(dialog.accept)
