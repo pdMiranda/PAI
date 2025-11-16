@@ -1,0 +1,10 @@
+PySide6
+matplotlib
+numpy
+nibabel
+Pillow
+pandas
+scikit-learn
+scikit-image
+joblib
+scipy
