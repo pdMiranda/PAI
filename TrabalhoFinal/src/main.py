@@ -1,38 +1,34 @@
-# --- IMPORTS NECESSÁRIOS (GUI E BACKEND) ---
 import sys
 import os
 import pathlib
-import io # Necessário para o overlay do matplotlib
-import shutil # <-- Adicionado para o db_split
+import io
+import shutil
 import nibabel as nib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import joblib
 import seaborn as sns
-import cv2 # Importado para a conversão de imagem
+import cv2
 
-# Imports da PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QFrame, QMenu, QMessageBox, QFileDialog,
     QGroupBox, QTextEdit, QGridLayout, QDialog,
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem # <-- Adicionado para Zoom
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 )
 from PySide6.QtGui import (
     QPixmap, QAction, QFont, QImage, QTextCursor, 
-    QPainter # <-- Adicionado para Zoom (RenderHint)
+    QPainter
 )
 from PySide6.QtCore import Qt, QObject, Signal, Slot
 
-# Imports do Skimage (do aaa.py)
 from skimage.morphology import remove_small_objects, binary_opening, disk
 from skimage.measure import label, regionprops
 from scipy.ndimage import binary_fill_holes, distance_transform_edt
 from skimage.filters import threshold_otsu, gaussian
 from skimage.exposure import rescale_intensity, equalize_adapthist
 
-# Imports do Sklearn (do shallow_classifier.ipynb e aaa.py)
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
@@ -41,25 +37,24 @@ from sklearn.pipeline import Pipeline
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from xgboost import XGBClassifier, XGBRegressor
 from sklearn.metrics import accuracy_score, recall_score, confusion_matrix, mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split # <-- Adicionado para o db_split
+from sklearn.model_selection import train_test_split
 
-# --- CAMINHOS GLOBAIS (Baseado na localização do script) ---
-# Assume que este script está em 'src/'
+# --- CAMINHOS GLOBAIS ---
 BASE_DIR = pathlib.Path(__file__).parent.resolve()
 MODELS_DIR = BASE_DIR / "models"
 OUT_DIR = BASE_DIR / "out"
-DATABASE_DIR = BASE_DIR.parent / "database" # Sobe um nível para 'Trabalho/database'
+DATABASE_DIR = BASE_DIR.parent / "database" 
 OASIS_CSV_PATH = DATABASE_DIR / "oasis_longitudinal_demographic.csv"
-IMG_DIR_AXL = DATABASE_DIR / "oasis_mri_axl" # <-- Adicionado para o db_split
+IMG_DIR_AXL = DATABASE_DIR / "axl"
 
-# --- PARÂMETROS GLOBAIS (do aaa.py) ---
+# --- PARÂMETROS GLOBAIS ---
 N_CLUSTERS = 4
 MIN_AREA_VENTRICLE = 100
 MAX_AREA_VENTRICLE = 15000
 MIN_AREA_BRAIN = 5000
 CENTER_TOLERANCE_RATIO = 0.2
 
-# Colunas esperadas pelos pipelines de predição (do shallow_classifier.ipynb)
+# Colunas esperadas pelos pipelines de predição
 # Pipeline de Demência (LR e XGB)
 COLS_DEMENCIA = [
     'Age', 
@@ -73,7 +68,7 @@ COLS_IDADE = [
     'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength'
 ]
 
-# --- CLASSE PARA REDIRECIONAR O TERMINAL (Request 3) ---
+# --- CLASSE PARA REDIRECIONAR O TERMINAL  ---
 class EmittingStream(QObject):
     """
     Classe para redirecionar 'print' (stdout/stderr) para um QObject
@@ -84,11 +79,10 @@ class EmittingStream(QObject):
     def flush(self):
         pass
 
-# --- INÍCIO: LÓGICA DE BACKEND (Extraído dos seus arquivos) ---
+# --- LÓGICA DE BACKEND ---
 
 def backend_segmentar_ventriculos(image_slice):
     """
-    Lógica de segmentação copiada de 'aaa.py'
     Recebe um slice 2D da imagem e retorna um dict com a máscara e a img pré-processada.
     """
     original_shape = image_slice.shape
@@ -117,7 +111,7 @@ def backend_segmentar_ventriculos(image_slice):
     mask_for_kmeans = mask_cerebro
     shape_for_kmeans = original_shape
         
-    # 4. K-Means
+    # 3. K-Means
     pixels_cerebro = image_for_kmeans[mask_for_kmeans].reshape(-1, 1)
     if pixels_cerebro.shape[0] < N_CLUSTERS:
         return {'ventriculos': np.zeros(original_shape, dtype=bool), 'pre_processamento': img_sem_cranio}
@@ -126,14 +120,14 @@ def backend_segmentar_ventriculos(image_slice):
     centers = kmeans.cluster_centers_.flatten()
     labels_flat = kmeans.labels_
 
-    # 5. Identificação do LCR
+    # 4. Identificação do LCR
     sorted_indices = np.argsort(centers)
     indice_lcr = sorted_indices[0] 
     labels_kmeans = np.zeros(shape_for_kmeans, dtype=int)
     labels_kmeans[mask_for_kmeans] = labels_flat + 1
     mask_lcr_total = (labels_kmeans == (indice_lcr + 1))
 
-    # 6. Isolamento dos Ventrículos 
+    # 5. Isolamento dos Ventrículos 
     dist_transform = distance_transform_edt(mask_lcr_total)
     labels_lcr = label(dist_transform)
     regioes_lcr = regionprops(labels_lcr)
@@ -165,8 +159,7 @@ def backend_segmentar_ventriculos(image_slice):
 
 def backend_extract_features(ventricle_mask): 
     """
-    Lógica de extração de features copiada de 'aaa.py'
-    Recebe a máscara 2D e retorna um DICIONÁRIO com as 6 features.
+    Recebe a máscara 2D e retorna um dicionario com as 6 features.
     """
     default_features = {
         'Ventricle_Area': 0, 'Ventricle_Perimeter': 0, 'Ventricle_Circularity': 0,
@@ -220,13 +213,11 @@ def backend_extract_features(ventricle_mask):
 def backend_load_nii_slice(nii_path):
     """
     Carrega um arquivo .nii.gz ou imagem, extrai o slice central e o ID.
-    (Lógica de 'process_single_image' do 'aaa.py')
     """
     try:
         filename = os.path.basename(nii_path)
         mri_id_base = filename.split('.')[0]
-        
-        # Usa o mri_id_base (com _axl) para carregar, mas o mri_id (sem _axl) para o ID
+
         mri_id = mri_id_base.replace('_axl', '').strip() # Limpa o ID
         
         nii_img = nib.load(nii_path)
@@ -240,7 +231,7 @@ def backend_load_nii_slice(nii_path):
         else:
             raise Exception(f"Dimensionalidade inesperada: {data.ndim}D")
 
-        # Rotaciona para a orientação correta (como em aaa.py)
+        # Rotaciona para a orientação correta
         image_slice_rotacionada = np.rot90(image_slice)
         return image_slice_rotacionada, mri_id
 
@@ -261,16 +252,15 @@ def backend_load_nii_slice(nii_path):
 def backend_get_metadata(mri_id):
     """
     Busca 'Age' e 'Group' no CSV da OASIS.
-    (Lógica de 'process_single_image' do 'aaa.py')
     """
     try:
         df_oasis = pd.read_csv(OASIS_CSV_PATH, sep=';', decimal=',')
         
-        # Limpeza do 'Group' (como em aaa.py e db_split)
+        # Limpeza do 'Group'
         df_oasis['Group'] = df_oasis['Group'].map({
             'Nondemented': 'NonDemented', 
             'Demented': 'Demented', 
-            'Converted': 'Demented' # Mapeia Converted para Demented
+            'Converted': 'Demented'
         })
         df_oasis = df_oasis.dropna(subset=['Group'])
         
@@ -284,13 +274,11 @@ def backend_get_metadata(mri_id):
         
     except Exception as e:
         print(f"AVISO: Metadados não encontrados para {mri_id}. Erro: {e}")
-        # Retorna NaN/Unknown para que a predição ainda possa tentar
         return {'Age': np.nan, 'Group': 'Unknown', 'Group_num': np.nan, 'MRI ID': mri_id}
 
 def backend_run_prediction(features_dict, metadata_dict):
     """
     Carrega os 4 pipelines (modelos+scalers) e faz a predição.
-    Baseado no 'shallow_classifier.ipynb'
     """
     try:
         # 1. Criar o DataFrame de 1 linha com todas as colunas
@@ -336,36 +324,32 @@ def backend_run_prediction(features_dict, metadata_dict):
 
 def backend_create_contour_overlay(slice_img, mask_img):
     """
-    Usa Matplotlib para criar a imagem de contorno exatamente como
-    o script aaa.py faz, mas salva em bytes.
+    Usa Matplotlib para criar a imagem de contorno
     """
     try:
-        # Normaliza a imagem original para exibição (mesmo que seja float)
-        # CORREÇÃO (Request 1): Normaliza a imagem original ANTES de desenhar
+        # Normaliza a imagem original para exibição
         slice_norm = cv2.normalize(slice_img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.imshow(slice_norm, cmap='gray') 
-        
-        # Desenha apenas o contorno da máscara em amarelo
+
         ax.contour(mask_img, levels=[0.5], colors='yellow', linewidths=1)
         
         ax.set_axis_off()
         
-        # Salva a figura em um buffer de bytes em memória
         buf = io.BytesIO()
         fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, dpi=100)
-        plt.close(fig) # Fecha a figura para liberar memória
+        plt.close(fig)
         
         buf.seek(0)
-        return buf.getvalue() # Retorna os bytes da imagem PNG
+        return buf.getvalue()
     
     except Exception as e:
         print(f"Erro ao criar overlay do matplotlib: {e}")
         return None
 
 
-# --- Funções de Treinamento (do shallow_classifier.ipynb) ---
+# --- Funções de Treinamento ---
 
 def specificity_score(y_true, y_pred):
     cm = confusion_matrix(y_true, y_pred)
@@ -386,7 +370,7 @@ def plot_confusion_matrix_backend(y_true, y_pred, title, filename):
     plt.ylabel('Verdadeiro (Actual)')
     plt.xlabel('Predito (Predicted)')
     plt.savefig(OUT_DIR / f"{filename}.png")
-    plt.close() # Fecha a figura para não consumir memória
+    plt.close()
     print(f"Matriz de confusão salva em {OUT_DIR}/{filename}.png")
 
 def plot_age_scatterplot_backend(y_true, y_pred, title, filename):
@@ -400,7 +384,7 @@ def plot_age_scatterplot_backend(y_true, y_pred, title, filename):
     plt.ylabel('Idade Predita (Predicted Age)')
     plt.grid(True)
     plt.savefig(OUT_DIR / f"{filename}.png")
-    plt.close() # Fecha a figura
+    plt.close()
     print(f"Gráfico de predição de idade salvo em {OUT_DIR}/{filename}.png")
 
 def load_data_set_backend(set_name):
@@ -417,7 +401,7 @@ def load_data_set_backend(set_name):
 
 def backend_run_training():
     """
-    Executa a lógica de treinamento completa do 'shallow_classifier.ipynb'
+    Executa a lógica de treinamento completa
     """
     try:
         print("Iniciando treinamento...")
@@ -523,16 +507,12 @@ def backend_run_training():
         QMessageBox.critical(None, "Erro no Treinamento", f"Ocorreu uma falha: {e}\n\nVerifique se os arquivos de 'database/treino' e 'database/validacao' existem.")
         return False
 
-# --- *** INÍCIO: CORREÇÃO DA LÓGICA (DB_SPLIT E FEATURE_EXTRACTION) *** ---
-
 def _copiar_arquivos(dataset_df, destino_folder, img_dir_origem):
     """
-    Função auxiliar para o db_split.
     Copia os arquivos .nii.gz e salva o CSV demográfico.
     """
     destino_path = DATABASE_DIR / destino_folder
-    
-    # Remove a pasta de destino se ela já existir (limpeza)
+
     if destino_path.exists():
         print(f"Removendo pasta antiga: {destino_path}")
         shutil.rmtree(destino_path)
@@ -542,14 +522,13 @@ def _copiar_arquivos(dataset_df, destino_folder, img_dir_origem):
     
     # Salva o CSV com os dados demográficos deste conjunto
     csv_path = destino_path / "features_full.csv"
-    # Salva o CSV COM o 'MRI ID' (com espaço), como no notebook original
     dataset_df.to_csv(csv_path, sep=';', decimal=',', index=False) 
     
     print(f"Copiando {len(dataset_df)} arquivos para {destino_folder}...")
     copiados = 0
     nao_encontrados = 0
     
-    # Itera sobre os IDs de MRI (com espaço)
+    # Itera sobre os IDs de MRI
     for mri_id in dataset_df['MRI ID']:
         nome_arquivo = f"{mri_id}_axl.nii.gz"
         arquivo_origem = img_dir_origem / nome_arquivo
@@ -569,7 +548,7 @@ def _copiar_arquivos(dataset_df, destino_folder, img_dir_origem):
 
 def backend_run_db_split():
     """
-    Executa a lógica completa de divisão do banco de dados (db_split.ipynb).
+    Executa a lógica completa de divisão do banco de dados.
     """
     try:
         print("Iniciando divisão do banco de dados...")
@@ -581,10 +560,8 @@ def backend_run_db_split():
             
         df = pd.read_csv(OASIS_CSV_PATH, sep=';', decimal=',')
         print(f"Arquivo demográfico lido. {df.shape[0]} registros encontrados.")
-        
-        # NÃO renomeia o 'MRI ID' aqui. Deixa como está (com espaço).
 
-        # 2. Limpeza de dados (mesma lógica do db_split e treinamento)
+        # 2. Limpeza de dados
         df['Group'] = df['Group'].map({
             'Nondemented': 'NonDemented', 
             'Demented': 'Demented', 
@@ -602,10 +579,10 @@ def backend_run_db_split():
         )
         print(f"Divisão principal: {len(df_train_val)} para Treino/Val, {len(df_test)} para Teste.")
 
-        # 4. Divisão Train (75% de 80% = 60%) e Val (25% de 80% = 20%)
+        # 4. Divisão Train e Val
         df_train, df_val = train_test_split(
             df_train_val, 
-            test_size=0.25, 
+            test_size=0.20, 
             random_state=42, 
             stratify=df_train_val['Group']
         )
@@ -633,7 +610,6 @@ def backend_run_db_split():
 
 def _processar_dataset_features(set_name):
     """
-    Função auxiliar para o feature_extraction.
     Processa um conjunto (treino, validacao, teste) e salva o CSV com features.
     """
     print(f"\n--- Processando features para o conjunto: {set_name} ---")
@@ -646,11 +622,10 @@ def _processar_dataset_features(set_name):
         print("Execute a 'Divisão da Base de Dados' primeiro.")
         raise Exception(f"CSV não encontrado para {set_name}")
         
-    # 1. Carrega o CSV demográfico (criado pelo db_split, que tem 'MRI ID')
+    # 1. Carrega o CSV demográfico
     df_demographics = pd.read_csv(csv_path, sep=';', decimal=',')
     print(f"Arquivo demográfico lido com {len(df_demographics)} registros.")
-    
-    # 2. Renomeia 'MRI ID' -> 'MRI_ID' (temporariamente, como no notebook)
+
     if 'MRI ID' in df_demographics.columns:
         df_demographics.rename(columns={'MRI ID': 'MRI_ID'}, inplace=True)
         print("Coluna 'MRI ID' renomeada para 'MRI_ID' para processamento.")
@@ -660,10 +635,9 @@ def _processar_dataset_features(set_name):
     all_features_list = []
     total_files = len(df_demographics)
     
-    # 3. Itera usando itertuples() e a coluna 'MRI_ID' (sem espaço)
+    # 3. Itera usando itertuples() e a coluna 'MRI_ID')
     for i, row in enumerate(df_demographics.itertuples()):
         try:
-            # Acessa a coluna renomeada (sem espaço)
             mri_id = row.MRI_ID 
         except AttributeError:
             print("Erro fatal: Coluna 'MRI_ID' não encontrada no itertuples. Verifique o CSV.")
@@ -679,13 +653,13 @@ def _processar_dataset_features(set_name):
             print(f"  Processando {set_name} - Arquivo {i+1}/{total_files} (ID: {mri_id})")
 
         try:
-            # 1. Carregar Slice (lógica do aaa.py)
+            # 1. Carregar Slice
             slice_original, _ = backend_load_nii_slice(str(img_path))
             
-            # 2. Segmentar (lógica do aaa.py)
+            # 2. Segmentar
             seg_result = backend_segmentar_ventriculos(slice_original)
             
-            # 3. Extrair Features (lógica do aaa.py)
+            # 3. Extrair Features
             features_dict = backend_extract_features(seg_result['ventriculos'])
             
             # 4. Combinar metadados e features
@@ -704,10 +678,10 @@ def _processar_dataset_features(set_name):
     if 'Index' in df_final_features.columns:
         df_final_features = df_final_features.drop(columns=['Index'])
         
-    # 5. Renomeia 'MRI_ID' de volta para 'MRI ID' (com espaço)
+    # 5. Renomeia 'MRI_ID' de volta para 'MRI ID'
     if 'MRI_ID' in df_final_features.columns:
         df_final_features.rename(columns={'MRI_ID': 'MRI ID'}, inplace=True)
-        print("Coluna 'MRI_ID' renomeada de volta para 'MRI ID' (com espaço) para salvar.")
+        print("Coluna 'MRI_ID' renomeada de volta para 'MRI ID' para salvar.")
     
     # --- *** FIM DA CORREÇÃO *** ---
         
@@ -720,7 +694,7 @@ def _processar_dataset_features(set_name):
 
 def backend_run_feature_extraction():
     """
-    Executa a lógica completa de extração de features (feature_extraction.ipynb).
+    Executa a lógica completa de extração de features.
     """
     try:
         print("Iniciando extração de features para toda a base...")
@@ -760,14 +734,12 @@ class PhotoViewer(QGraphicsView):
         
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) # Permite arrastar
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag) 
         self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
     def setPixmap(self, pixmap):
         self._pixmap_item.setPixmap(pixmap)
-        # NÃO chama fitInView ou scale aqui
-        # O resizeEvent cuidará disso
     
     def wheelEvent(self, event):
         """ Zoom in/out com a roda do mouse """
@@ -785,7 +757,7 @@ class PhotoViewer(QGraphicsView):
         
         self.scale(scale_factor, scale_factor)
         
-        # Reposiciona a cena para que o ponto sob o mouse permaneça lá
+        # Reposiciona a cena
         new_pos = self.mapToScene(event.position().toPoint())
         delta = new_pos - old_pos
         self.translate(delta.x(), delta.y())
@@ -976,8 +948,6 @@ class ImageProcessingApp(QMainWindow):
         layout_superior.addLayout(layout_botoes_db)
 
         layout_superior.addStretch(1) 
-
-        # --- Layout de Predição (com Título à Esquerda) ---
         
         # 1. Layout "wrapper" para o título e a caixa
         layout_pred_wrapper = QHBoxLayout()
@@ -989,8 +959,8 @@ class ImageProcessingApp(QMainWindow):
         label_titulo_pred.setFont(font_pred)
         layout_pred_wrapper.addWidget(label_titulo_pred)
 
-        # 3. Cria o QGroupBox *sem* título (apenas para a borda)
-        grupo_predicoes = QGroupBox("") # Título movido para o label acima
+        # 3. Cria o QGroupBox
+        grupo_predicoes = QGroupBox("")
         layout_predicoes = QHBoxLayout(grupo_predicoes) 
         
         # Estilo para os labels de resultado
@@ -1026,7 +996,7 @@ class ImageProcessingApp(QMainWindow):
         label_lr_close = QLabel(")")
         label_lr_close.setFont(font_pred)
 
-        # 4. Adiciona os widgets ao layout *interno* (layout_predicoes)
+        # 4. Adiciona os widgets ao layout interno (layout_predicoes)
         layout_predicoes.addWidget(label_xgb_open)
         layout_predicoes.addWidget(self.label_pred_idade_xgb)
         layout_predicoes.addWidget(label_xgb_sep)
@@ -1041,9 +1011,9 @@ class ImageProcessingApp(QMainWindow):
         layout_predicoes.addWidget(self.label_pred_demencia_lr)
         layout_predicoes.addWidget(label_lr_close)
         
-        layout_predicoes.setSpacing(3) # Espaçamento bem justo
+        layout_predicoes.setSpacing(3)
         
-        # 5. Adiciona o GroupBox (com os resultados) ao wrapper
+        # 5. Adiciona o GroupBox com os resultados ao wrapper
         layout_pred_wrapper.addWidget(grupo_predicoes)
         
         # 6. Adiciona o wrapper (Título + Caixa) ao layout superior
@@ -1071,19 +1041,19 @@ class ImageProcessingApp(QMainWindow):
             print("Carregando e processando slice...")
             slice_original, mri_id = backend_load_nii_slice(self.caminho_imagem_original)
             
-            # --- 2. Segmentação (do aaa.py) ---
+            # --- 2. Segmentação ---
             print("Segmentando ventrículos...")
             seg_result = backend_segmentar_ventriculos(slice_original)
             img_preprocessada = seg_result['pre_processamento']
-            mask_ventriculos = seg_result['ventriculos'] # Array booleano
+            mask_ventriculos = seg_result['ventriculos']
 
-            # --- 3. Gerar Imagem de Contorno (como em aaa.py) ---
+            # --- 3. Gerar Imagem de Contorno ---
             print("Gerando overlay de contorno...")
             overlay_bytes = backend_create_contour_overlay(slice_original, mask_ventriculos)
             if overlay_bytes is None:
                 raise Exception("Falha ao gerar imagem de contorno.")
 
-            # --- 4. Extração de Features (do aaa.py / feature_extraction.ipynb) ---
+            # --- 4. Extração de Features ---
             print("Extraindo features...")
             features_dict = backend_extract_features(mask_ventriculos)
             
@@ -1091,7 +1061,7 @@ class ImageProcessingApp(QMainWindow):
             print(f"Buscando metadados para {mri_id}...")
             metadata_dict = backend_get_metadata(mri_id)
 
-            # --- 6. Predição (do shallow_classifier.ipynb) ---
+            # --- 6. Predição  ---
             print("Realizando predições...")
             preds = backend_run_prediction(features_dict, metadata_dict)
             
