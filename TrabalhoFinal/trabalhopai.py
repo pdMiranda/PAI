@@ -2,8 +2,9 @@ import sys
 import platform
 import io
 import os
+import shutil
 import matplotlib
-matplotlib.use('Agg') #usamos para salvar figuras sem abrir janelas
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (QAction,QFont,QPixmap,QImage,QPainter,QColor,QTextCursor)
@@ -31,6 +32,7 @@ from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.optimizers import Adam
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, mean_absolute_error
+
 #Variáveis globais e contendo caminhos (paths)
 ROOT = Path('.')
 OUTPUT_DIR = ROOT / 'out'
@@ -189,7 +191,7 @@ def plot_learning_curves_dl(history, save_path):
     plt.close(fig)
     print(f"Curvas de aprendizado salvas em: {save_path}")
 
-def carregar_df_csv():
+def carregar_df_csv(): 
     try:
         df_oasis = pd.read_csv(OASIS_CSV_PATH, sep=';', decimal=',')
     except FileNotFoundError:
@@ -425,9 +427,17 @@ class InterfaceGrafica(QMainWindow):
         menu_bar = QMenuBar(self)
         self.setMenuBar(menu_bar)
         menu_modelo = menu_bar.addMenu("Treinamento")
+        
         acao_treinar = QAction("Realizar treinamento", self)
         acao_treinar.triggered.connect(self.iniciar_treinamento)
         menu_modelo.addAction(acao_treinar)
+        
+        # --- NOVO BOTÃO PARA PREPARAR BASE DE DADOS ---
+        acao_preparar = QAction("Preparar base de dados", self)
+        acao_preparar.triggered.connect(self.iniciar_preparacao_base)
+        menu_modelo.addAction(acao_preparar)
+        # ----------------------------------------------
+        
         menu_modelo.addSeparator()
         acao_visualizar = QAction("Visualizar graficos de treinamento", self)
         acao_visualizar.triggered.connect(self.visualizar_performance)
@@ -594,6 +604,7 @@ class InterfaceGrafica(QMainWindow):
         except FileNotFoundError:
             print(f"Erro {OASIS_CSV_PATH} não encontrado.")
             return None
+            
     def processar_img_input(self, caminho_arquivo):
         colunas_idade = ['Group_num', 'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength']
         colunas_demencia = ['Age','Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity','Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength']
@@ -898,6 +909,186 @@ class InterfaceGrafica(QMainWindow):
         self.tabela_caracteristicas.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tabela_caracteristicas.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     
+    # --- NOVA FUNÇÃO: Trigger do botão "Preparar base de dados" ---
+    def iniciar_preparacao_base(self):
+        confirmacao = QMessageBox.question(self, 
+            "Confirmar Preparação da Base", 
+            "Este processo irá:\n"
+            "1. Segmentar todas as imagens na pasta 'axl'.\n"
+            "2. Gerar novos arquivos 'features_full.csv'.\n"
+            "3. Dividir a base em pastas 'treino', 'teste' e 'validacao'.\n\n"
+            "Isso pode levar vários minutos e sobrescreverá arquivos existentes.\n"
+            "Deseja continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if confirmacao == QMessageBox.StandardButton.No:
+            return
+
+        self.barra_status.showMessage("Preparando base de dados... Por favor aguarde.")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+
+        try:
+            sucesso, msg = self.executar_pipeline_dados()
+            if sucesso:
+                QMessageBox.information(self, "Sucesso", msg)
+                self.barra_status.showMessage("Base de dados preparada com sucesso!", 10000)
+            else:
+                QMessageBox.critical(self, "Erro", msg)
+                self.barra_status.showMessage("Erro ao preparar base.", 10000)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Erro Crítico", str(e))
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    # --- NOVA FUNÇÃO: Lógica unificada dos notebooks ---
+    def executar_pipeline_dados(self):
+        # --- PARTE 1: Extração de features (feature_extraction.ipynb) ---
+        print("Iniciando extração de features em lote...")
+        
+        import glob
+        # Usando a variavel global AXL_DIR
+        all_files = list(AXL_DIR.glob("*.nii.gz"))
+        total_files = len(all_files)
+        results_list = []
+        
+        if total_files == 0:
+            return False, f"Nenhuma imagem encontrada em {AXL_DIR}"
+
+        for i, file_path in enumerate(all_files):
+            try:
+                # Nome base limpo
+                base_name = file_path.name.split('.')[0]
+                mr_id = base_name.replace('_axl', '').strip()
+                
+                nii_img = nib.load(str(file_path))
+                data = nii_img.get_fdata()
+                
+                if data.ndim == 3:
+                    slice_z = data.shape[2] // 2
+                    image_slice = data[:, :, slice_z]
+                elif data.ndim == 2:
+                    image_slice = data
+                elif data.ndim == 4:
+                    slice_z = data.shape[2] // 2
+                    image_slice = data[:, :, slice_z, 0]
+                else:
+                    print(f"Ignorando {mr_id} (dimensão invalida).")
+                    continue
+                
+                image_slice = np.rot90(image_slice) # Manter consistencia com a visualização
+
+                # Reutiliza a função de segmentação existente da classe
+                seg_result = self.exec_segmentacao(image_slice)
+                ventricle_mask = seg_result['ventriculos']
+                
+                # Reutiliza a função de extração de features existente
+                features = self.extract_features(ventricle_mask)
+                features['MRI ID'] = mr_id
+                results_list.append(features)
+                
+                if i % 20 == 0:
+                    self.barra_status.showMessage(f"Processando imagem {i}/{total_files}...")
+                    QApplication.processEvents()
+
+            except Exception as e:
+                print(f"Erro ao processar {file_path}: {e}")
+
+        if not results_list:
+            return False, "Falha ao extrair features das imagens."
+
+        df_features = pd.DataFrame(results_list)
+        
+        # Carregar CSV demográfico
+        try:
+            df_demographic = pd.read_csv(OASIS_CSV_PATH, sep=';', decimal=',')
+            df_demographic['MRI ID'] = df_demographic['MRI ID'].str.strip()
+        except Exception as e:
+            return False, f"Erro ao ler CSV demográfico: {e}"
+
+        # Merge
+        df_final = pd.merge(df_demographic, df_features, on='MRI ID', how='left')
+        
+        # Limpar Grupos (Lógica do notebook)
+        def map_class_robusta(row):
+            group = row['Group']
+            cdr = row['CDR']
+            if group == 'Converted':
+                if cdr > 0: return 'Demented'
+                else: return 'NonDemented'
+            if group == 'Demented': return 'Demented'
+            return 'NonDemented'
+
+        df_final['Group'] = df_final.apply(map_class_robusta, axis=1)
+        
+        # Salvar CSVs intermediários
+        features_full_path = DB_ROOT / 'features_full.csv'
+        features_ids_path = DB_ROOT / 'features_identifiers.csv'
+        
+        cols_full_requested = ['Subject ID', 'MRI ID', 'Group', 'Age', 'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength']
+        df_final = df_final[df_final['Ventricle_Area'].notna()] # Filtrar apenas os que tem imagem processada
+        
+        df_final[cols_full_requested].to_csv(features_full_path, index=False, sep=';', decimal=',')
+        
+        print("Extração concluída. Iniciando Divisão (Split)...")
+
+        # --- PARTE 2: Divisão da base (db_split.ipynb) ---
+        
+        # Diretórios de saída
+        TREINO_DIR = DB_ROOT / 'treino'
+        VAL_DIR = DB_ROOT / 'validacao'
+        TESTE_DIR = DB_ROOT / 'teste'
+        
+        for d in [TREINO_DIR / 'imgs', VAL_DIR / 'imgs', TESTE_DIR / 'imgs']:
+            os.makedirs(d, exist_ok=True)
+
+        # Lógica de split por paciente
+        df_work = df_final.copy()
+        df_work['Group_num'] = df_work['Group'].map({'Demented': 1, 'NonDemented': 0})
+        
+        # Agrupar por paciente para não vazar dados
+        patient_labels = df_work.groupby('Subject ID')['Group_num'].max()
+        patient_ids = patient_labels.index
+        labels = patient_labels.values
+        
+        # Split
+        train_val_patients, test_patients, train_val_labels, _ = train_test_split(patient_ids, labels, test_size=0.2, stratify=labels, random_state=42)
+        train_patients, val_patients, _, _ = train_test_split(train_val_patients, train_val_labels, test_size=0.2, stratify=train_val_labels, random_state=42)
+
+        # Função auxiliar para salvar e copiar
+        def processar_subset(patients_list, output_folder):
+            subset_df = df_work[df_work['Subject ID'].isin(patients_list)].copy()
+            
+            # Salvar CSVs do subset
+            subset_df[cols_full_requested].to_csv(output_folder / 'features_full.csv', index=False, sep=';', decimal=',')
+            
+            # Copiar Imagens
+            dest_img_dir = output_folder / 'imgs'
+            count = 0
+            for _, row in subset_df.iterrows():
+                mri_id = row['MRI ID']
+                # Procurar arquivo original
+                orig_file = list(AXL_DIR.glob(f"*{mri_id}*.nii.gz"))
+                if orig_file:
+                    shutil.copy(orig_file[0], dest_img_dir / orig_file[0].name)
+                    count += 1
+            return count
+
+        c_train = processar_subset(train_patients, TREINO_DIR)
+        c_val = processar_subset(val_patients, VAL_DIR)
+        c_test = processar_subset(test_patients, TESTE_DIR)
+
+        return True, (f"Processamento concluído!\n\n"
+                      f"Imagens processadas: {len(df_final)}\n"
+                      f"Treino: {c_train} imgs ({len(train_patients)} pacientes)\n"
+                      f"Validação: {c_val} imgs ({len(val_patients)} pacientes)\n"
+                      f"Teste: {c_test} imgs ({len(test_patients)} pacientes)\n\n"
+                      f"Arquivos salvos em: {DB_ROOT}")
+
     def iniciar_treinamento(self):
         confirmacao = QMessageBox.question(self, 
             "Confirmação de Treinamento (Deep Learning)", 
