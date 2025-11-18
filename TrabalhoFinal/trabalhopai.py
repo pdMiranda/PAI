@@ -380,9 +380,6 @@ def iniciar_treino_regressao():
     return True, "Treinamento de regressão DL finalizado!"
 
 
-# =========================================================================
-# FUNÇÃO DE TREINAMENTO RASA (Adicionada)
-# =========================================================================
 def iniciar_treinamento_raso():
     print("-- DEBUG -- Iniciando treinamento: Classificador Raso (LR/XGBoost)")
     
@@ -426,7 +423,7 @@ def iniciar_treinamento_raso():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     try:
-        # --- TAREFA 1: CLASSIFICAÇÃO (Regressão Linear) ---
+        # --- CLASSIFICAÇÃO (Regressão Linear) ---
         lin_reg_classifier = LinearRegression()
         lin_reg_classifier.fit(X_train, y_class_train)
         joblib.dump(lin_reg_classifier, MODEL_LR_DEMENCIA_PATH)
@@ -456,7 +453,7 @@ def iniciar_treinamento_raso():
         plt.savefig(CM_SHALLOW_PATH, dpi=300, bbox_inches='tight')
         plt.close(fig)
         
-        # --- TAREFA 2: REGRESSÃO (XGBoost) ---
+        # --- REGRESSÃO (XGBoost) ---
         xgb_regressor = XGBRegressor(
             objective='reg:squarederror', 
             n_estimators=500, 
@@ -486,8 +483,6 @@ def iniciar_treinamento_raso():
         import traceback
         traceback.print_exc()
         return False, f"Erro crítico durante o treinamento raso: {e}"
-# =========================================================================
-
 
 def predict_single_classification_dl(nii_path):
     try:
@@ -521,7 +516,6 @@ def predict_single_age_dl(nii_path):
 
     return age_real, age_norm
 
-
 class InterfaceGrafica(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -540,11 +534,9 @@ class InterfaceGrafica(QMainWindow):
         self.setMenuBar(menu_bar)
         menu_modelo = menu_bar.addMenu("Treinamento")
         
-        # --- NOVO BOTÃO PARA TREINAMENTO RASO ---
         acao_treinar_raso = QAction("Realizar treinamento (Classificador Raso)", self)
         acao_treinar_raso.triggered.connect(self.iniciar_treinamento_raso_handler)
         menu_modelo.addAction(acao_treinar_raso)
-        # ----------------------------------------
         
         acao_treinar = QAction("Realizar treinamento (Deep Learning)", self)
         acao_treinar.triggered.connect(self.iniciar_treinamento)
@@ -788,7 +780,7 @@ class InterfaceGrafica(QMainWindow):
             
             resultados["features_tabela"] = df_single[['Subject ID','MRI ID','Group','Age','Ventricle_Area','Ventricle_Perimeter','Ventricle_Circularity','Ventricle_Eccentricity','Ventricle_Solidity','Ventricle_MajorAxisLength']].copy()
 
-            # --- PARTE 1: CLASSIFICAÇÃO RASO (Regressão Linear + Limiar Otimizado) ---
+            # --- CLASSIFICAÇÃO RASO (Regressão Linear + Limiar Otimizado) ---
             print("Executando predição de Classificação (Regressão Linear)...")
             X_demencia_lr = df_single[features] 
             
@@ -804,7 +796,7 @@ class InterfaceGrafica(QMainWindow):
                 f"Grupo Real: {group}\n"
                 f"Predição (Regressão Linear): {pred_lr_dem_label} (Score Bruto: {raw_pred_lr:.4f}, Limiar: {optimal_threshold:.2f})")
 
-            # --- PARTE 2: REGRESSÃO RASO (XGBoost) ---
+            # --- REGRESSÃO RASO (XGBoost) ---
             print("Executando predição de Regressão (XGBoost)...")
             X_idade_xgb = df_single[features] 
             
@@ -879,7 +871,6 @@ class InterfaceGrafica(QMainWindow):
             print(msg_erro)
             return False, msg_erro
             
-    # --- HANDLER PARA TREINAMENTO RASO (Adicionada) ---
     def iniciar_treinamento_raso_handler(self):
         confirmacao = QMessageBox.question(self, 
             "Confirmação de Treinamento (Classificador Raso)", 
@@ -1065,7 +1056,6 @@ class InterfaceGrafica(QMainWindow):
         self.tabela_caracteristicas.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tabela_caracteristicas.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     
-    # --- NOVA FUNÇÃO: Trigger do botão "Preparar base de dados" ---
     def iniciar_preparacao_base(self):
         confirmacao = QMessageBox.question(self, 
             "Confirmar Preparação da Base", 
@@ -1101,9 +1091,8 @@ class InterfaceGrafica(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
 
-    # --- NOVA FUNÇÃO: Lógica unificada dos notebooks ---
     def executar_pipeline_dados(self):
-        # --- PARTE 1: Extração de features (feature_extraction.ipynb) ---
+        # --- Extração de features ---
         print("Iniciando extração de features em lote...")
         
         import glob
@@ -1192,7 +1181,7 @@ class InterfaceGrafica(QMainWindow):
         
         print("Extração concluída. Iniciando Divisão (Split)...")
 
-        # --- PARTE 2: Divisão da base (db_split.ipynb) ---
+        # --- Divisão da base ---
         
         # Diretórios de saída
         TREINO_DIR = DB_ROOT / 'treino'
