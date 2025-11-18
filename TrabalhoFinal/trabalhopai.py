@@ -6,6 +6,7 @@ import shutil
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import seaborn as sns
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (QAction,QFont,QPixmap,QImage,QPainter,QColor,QTextCursor)
 from PySide6.QtWidgets import (QApplication,QMainWindow, QWidget, QTabWidget,QVBoxLayout, QHBoxLayout, QStatusBar, QFileDialog,QGraphicsView, QGraphicsScene, 
@@ -40,19 +41,22 @@ MODELS_DIR = ROOT / 'models'
 DB_ROOT = ROOT / 'database'
 AXL_DIR = DB_ROOT / 'axl'
 OASIS_CSV_PATH = DB_ROOT / 'oasis_longitudinal_demographic.csv'
-MODEL_LR_DEMENCIA_PATH = MODELS_DIR / 'modelo_lr_demencia.joblib'
-MODEL_XGB_DEMENCIA_PATH = MODELS_DIR / 'modelo_xgb_demencia.joblib'
-MODEL_LR_IDADE_PATH = MODELS_DIR / 'modelo_lr_idade.joblib'
-MODEL_XGB_IDADE_PATH = MODELS_DIR / 'modelo_xgb_idade.joblib'
+
+MODEL_LR_DEMENCIA_PATH = MODELS_DIR / 'modelo_lr.pkl'
+MODEL_LR_DEMENCIA_THRESHOLD_PATH = MODELS_DIR / 'optimal_threshold.pkl'
+MODEL_XGB_IDADE_PATH = MODELS_DIR / 'modelo_xgb.pkl' 
+
 MODEL_DL_DEMENCIA_PATH = MODELS_DIR / 'efficientnet_classification.keras'
 MODEL_DL_IDADE_PATH = MODELS_DIR / 'efficientnet_age_regression.keras'
 MODEL_DL_AGE_STATS_PATH = MODELS_DIR / 'age_min_max.npy'
 
-#gráficos gerados pelo treinamento
 CM_DL_DEMENCIA_PATH = OUTPUT_DIR / 'dl_confusion_matrix.png'
 CURVES_DL_DEMENCIA_PATH = OUTPUT_DIR / 'dl_classification_curves.png'
 SCATTER_DL_IDADE_PATH = OUTPUT_DIR / 'dl_age_scatter_plot.png'
 CURVES_DL_IDADE_PATH = OUTPUT_DIR / 'dl_regression_curves.png'
+
+CM_SHALLOW_PATH = OUTPUT_DIR / 'sl_cm_linear.png'
+SCATTER_SHALLOW_PATH = OUTPUT_DIR / 'sl_scatter_xgboost.png'
 
 #semente para reprodutibilidade
 SEED = 42
@@ -225,7 +229,7 @@ def carregar_df_csv():
 
 
 def iniciar_treino_classificacao():
-    print("-- DEBUG -- iniciando treinamento: classificação (demência)")
+    print("-- DEBUG -- iniciando treinamento: classificação (Classificação de Grupo - DL)")
     data_split = carregar_df_csv()
     if data_split is None:
         return False, "Falha ao carregar dados para classsificação"
@@ -258,7 +262,7 @@ def iniciar_treino_classificacao():
         epochs=TOTAL_EPOCHS,
         initial_epoch=history.epoch[-1] if history.epoch else 0,
         validation_data=val_ds)
-    print("Treinamento de classificação finalizado com sucesso!")
+    print("Treinamento de classificação DL finalizado com sucesso!")
     
     # Combinar históricos para plotagem
     history.history['accuracy'].extend(history_fine_tune.history['accuracy'])
@@ -281,7 +285,7 @@ def iniciar_treino_classificacao():
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=CLASS_NAMES)
     fig, ax = plt.subplots()
     disp.plot(cmap='Blues', ax=ax)
-    plt.title("Matriz de confusão (EfficientNet)")
+    plt.title("Matriz de Confusão (EfficientNet)")
     plt.savefig(CM_DL_DEMENCIA_PATH)
     plt.close(fig)
     print(f"Matriz de confusão salva em: {CM_DL_DEMENCIA_PATH}")
@@ -289,7 +293,7 @@ def iniciar_treino_classificacao():
     return True, "Treinamento de classificação DL finalizado!"
 
 def iniciar_treino_regressao():
-    print("-- DEBUG -- Iniciando treinamento: regressão(idade)")
+    print("-- DEBUG -- Iniciando treinamento: regressão (idade - DL)")
     data_split = carregar_df_csv()
     if data_split is None:
         return False, "Falha ao carregar dados para regressão"
@@ -336,7 +340,7 @@ def iniciar_treino_regressao():
         validation_data=val_ds_reg
     )
     
-    print("Treinamento de regressão finlizado com sucesso!")
+    print("Treinamento de regressão DL finlizado com sucesso!")
     reg_history.history['mae'].extend(reg_history_ft.history['mae'])
     reg_history.history['val_mae'].extend(reg_history_ft.history['val_mae'])
     reg_history.history['loss'].extend(reg_history_ft.history['loss'])
@@ -373,8 +377,116 @@ def iniciar_treino_regressao():
     plt.close()
     print(f"Gráfico de dispersão da regressão salvo em: {SCATTER_DL_IDADE_PATH}")
     
-    return True, "Treinamento de regressão finalizado!"
+    return True, "Treinamento de regressão DL finalizado!"
 
+
+# =========================================================================
+# FUNÇÃO DE TREINAMENTO RASA (Adicionada)
+# =========================================================================
+def iniciar_treinamento_raso():
+    print("-- DEBUG -- Iniciando treinamento: Classificador Raso (LR/XGBoost)")
+    
+    # Importações locais necessárias para o treinamento raso
+    from sklearn.linear_model import LinearRegression
+    from xgboost import XGBRegressor
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, mean_absolute_error
+    
+    # Defina aqui os nomes dos seus arquivos (usando variáveis globais)
+    caminho_treino = DB_ROOT / 'treino' / 'features_full.csv'
+    caminho_validacao = DB_ROOT / 'validacao' / 'features_full.csv'
+    caminho_teste = DB_ROOT / 'teste' / 'features_full.csv'
+    
+    # Mapeamento de classes e features
+    group_map = {'NonDemented': 0, 'Demented': 1} 
+    features = [
+        'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 
+        'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength'
+    ]
+
+    def processar_csv(caminho):
+        try:
+            df = pd.read_csv(caminho, sep=';', decimal=',')
+            df['Group_Encoded'] = df['Group'].map(group_map)
+            df = df.dropna(subset=['Group_Encoded'] + features)
+            X = df[features]
+            y_class = df['Group_Encoded'] # Target Classificação de Grupo
+            y_reg = df['Age']             # Target Regressão de Idade
+            return X, y_class, y_reg
+        except FileNotFoundError:
+             return None, None, None
+    
+    X_train, y_class_train, y_reg_train = processar_csv(caminho_treino)
+    X_val, y_class_val, y_reg_val = processar_csv(caminho_validacao)
+    X_test, y_class_test, y_reg_test = processar_csv(caminho_teste)
+    
+    if X_train is None or X_test is None or X_val is None:
+        return False, f"ERRO: Arquivos CSV de treino/validação/teste não encontrados em {DB_ROOT}. Execute 'Preparar base de dados' primeiro."
+    
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    try:
+        # --- TAREFA 1: CLASSIFICAÇÃO (Regressão Linear) ---
+        lin_reg_classifier = LinearRegression()
+        lin_reg_classifier.fit(X_train, y_class_train)
+        joblib.dump(lin_reg_classifier, MODEL_LR_DEMENCIA_PATH)
+        
+        # Otimização do Limiar (usando set de validação)
+        raw_predictions_val = lin_reg_classifier.predict(X_val)
+        best_threshold = 0.5
+        best_accuracy = 0
+        for threshold in np.arange(0.00, 1.01, 0.01):
+            temp_preds = [1 if val >= threshold else 0 for val in raw_predictions_val]
+            current_accuracy = accuracy_score(y_class_val, temp_preds)
+            if current_accuracy > best_accuracy:
+                best_accuracy = current_accuracy
+                best_threshold = threshold
+        
+        joblib.dump(best_threshold, MODEL_LR_DEMENCIA_THRESHOLD_PATH)
+        
+        # Avaliação e Salvamento da Matriz de Confusão
+        raw_predictions_test = lin_reg_classifier.predict(X_test)
+        class_predictions_test = [1 if val >= best_threshold else 0 for val in raw_predictions_test]
+        cm = confusion_matrix(y_class_test, class_predictions_test)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax)
+        plt.title(f'Matriz de Confusão - LR (Limiar={best_threshold:.2f})')
+        plt.ylabel('Real')
+        plt.xlabel('Predito')
+        plt.savefig(CM_SHALLOW_PATH, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        # --- TAREFA 2: REGRESSÃO (XGBoost) ---
+        xgb_regressor = XGBRegressor(
+            objective='reg:squarederror', 
+            n_estimators=500, 
+            learning_rate=0.05, 
+            max_depth=5, 
+            random_state=42
+        )
+        xgb_regressor.fit(X_train, y_reg_train)
+        joblib.dump(xgb_regressor, MODEL_XGB_IDADE_PATH)
+        
+        # Avaliação e Salvamento do Scatter Plot
+        age_predictions = xgb_regressor.predict(X_test)
+        mae = mean_absolute_error(y_reg_test, age_predictions)
+        plt.figure(figsize=(8, 6))
+        plt.scatter(y_reg_test, age_predictions, alpha=0.7, color='green', edgecolors='k')
+        plt.plot([y_reg_test.min(), y_reg_test.max()], [y_reg_test.min(), y_reg_test.max()], 'k--', lw=2)
+        plt.xlabel('Idade Real')
+        plt.ylabel('Idade Predita (XGBoost)')
+        plt.title(f'Regressão: Idade Real vs Predita (MAE: {mae:.2f} anos)')
+        plt.grid(True)
+        plt.savefig(SCATTER_SHALLOW_PATH, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return True, "Treinamento Raso (LR/XGBoost) finalizado com sucesso!"
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"Erro crítico durante o treinamento raso: {e}"
+# =========================================================================
 
 
 def predict_single_classification_dl(nii_path):
@@ -428,18 +540,27 @@ class InterfaceGrafica(QMainWindow):
         self.setMenuBar(menu_bar)
         menu_modelo = menu_bar.addMenu("Treinamento")
         
-        acao_treinar = QAction("Realizar treinamento", self)
+        # --- NOVO BOTÃO PARA TREINAMENTO RASO ---
+        acao_treinar_raso = QAction("Realizar treinamento (Classificador Raso)", self)
+        acao_treinar_raso.triggered.connect(self.iniciar_treinamento_raso_handler)
+        menu_modelo.addAction(acao_treinar_raso)
+        # ----------------------------------------
+        
+        acao_treinar = QAction("Realizar treinamento (Deep Learning)", self)
         acao_treinar.triggered.connect(self.iniciar_treinamento)
         menu_modelo.addAction(acao_treinar)
         
-        # --- NOVO BOTÃO PARA PREPARAR BASE DE DADOS ---
         acao_preparar = QAction("Preparar base de dados", self)
         acao_preparar.triggered.connect(self.iniciar_preparacao_base)
         menu_modelo.addAction(acao_preparar)
-        # ----------------------------------------------
         
         menu_modelo.addSeparator()
-        acao_visualizar = QAction("Visualizar graficos de treinamento", self)
+        
+        acao_visualizar_shallow = QAction("Visualizar gráficos (Classificador Raso)", self)
+        acao_visualizar_shallow.triggered.connect(self.visualizar_performance_shallow)
+        menu_modelo.addAction(acao_visualizar_shallow)
+
+        acao_visualizar = QAction("Visualizar graficos de treinamento (Deep Learning)", self)
         acao_visualizar.triggered.connect(self.visualizar_performance)
         menu_modelo.addAction(acao_visualizar)
 
@@ -549,7 +670,7 @@ class InterfaceGrafica(QMainWindow):
         painel_inferior = QWidget()
         layout_inferior = QVBoxLayout(painel_inferior)
         
-        layout_inferior.addWidget(QLabel("Características extraídas (usadas nos modelos Joblib)"))
+        layout_inferior.addWidget(QLabel("Características extraídas (usadas nos modelos Rasos)"))
         self.tabela_caracteristicas = QTableWidget()
         self.tabela_caracteristicas.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.tabela_caracteristicas.setAlternatingRowColors(True)
@@ -559,7 +680,7 @@ class InterfaceGrafica(QMainWindow):
         layout_resultados = QHBoxLayout()
         widget_joblib = QWidget()
         layout_joblib = QVBoxLayout(widget_joblib)
-        layout_joblib.addWidget(QLabel("Resultados (Baseado em Features - Joblib):"))
+        layout_joblib.addWidget(QLabel("Resultados (Classificador Raso - LR/XGBoost):"))
         self.log_classificacao = QTextEdit()
         self.log_classificacao.setReadOnly(True)
         self.log_classificacao.setMaximumHeight(100)
@@ -606,8 +727,11 @@ class InterfaceGrafica(QMainWindow):
             return None
             
     def processar_img_input(self, caminho_arquivo):
-        colunas_idade = ['Group_num', 'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength']
-        colunas_demencia = ['Age','Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity','Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength']
+        # Features usadas em ambos os modelos rasos (Classificação e Regressão)
+        features = [
+            'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 
+            'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength'
+        ]
             
         resultados = { "error": None }
         try:
@@ -642,7 +766,7 @@ class InterfaceGrafica(QMainWindow):
             resultados["pixmap_preproc"] = self.conversao_np_qpixmap(preprocessed_img)
 
             print("Extraindo features morfológicas...")
-            features = self.extract_features(ventricle_mask)
+            features_extraidas = self.extract_features(ventricle_mask)
 
             mri_id = self.get_id_img(caminho_arquivo)
             
@@ -657,37 +781,39 @@ class InterfaceGrafica(QMainWindow):
 
             data_dict = {
                 'Subject ID': subject_id, 'MRI ID': mri_id, 'Group': group, 'Age': age,
-                **features
+                **features_extraidas
             }
             df_single = pd.DataFrame([data_dict])
             df_single['Group_num'] = df_single['Group'].map({'NonDemented': 0, 'Demented': 1, 'Converted': 1})
             
             resultados["features_tabela"] = df_single[['Subject ID','MRI ID','Group','Age','Ventricle_Area','Ventricle_Perimeter','Ventricle_Circularity','Ventricle_Eccentricity','Ventricle_Solidity','Ventricle_MajorAxisLength']].copy()
 
-            print("Executando predição (Joblib)...")
-            X_demencia = df_single[colunas_demencia]
-            model_lr_dem = joblib.load(MODEL_LR_DEMENCIA_PATH)
-            model_xgb_dem = joblib.load(MODEL_XGB_DEMENCIA_PATH)
-            pred_lr_dem_val = model_lr_dem.predict(X_demencia)[0]
-            pred_xgb_dem_val = model_xgb_dem.predict(X_demencia)[0]
-            pred_lr_dem_label = 'Demented' if pred_lr_dem_val == 1 else 'NonDemented'
-            pred_xgb_dem_label = 'Demented' if pred_xgb_dem_val == 1 else 'NonDemented'
+            # --- PARTE 1: CLASSIFICAÇÃO RASO (Regressão Linear + Limiar Otimizado) ---
+            print("Executando predição de Classificação (Regressão Linear)...")
+            X_demencia_lr = df_single[features] 
             
+            model_lr_dem = joblib.load(MODEL_LR_DEMENCIA_PATH)
+            optimal_threshold = joblib.load(MODEL_LR_DEMENCIA_THRESHOLD_PATH) # Carrega o limiar ótimo
+
+            raw_pred_lr = model_lr_dem.predict(X_demencia_lr)[0]
+            
+            # Aplica o limiar ótimo para obter a classificação final
+            pred_lr_dem_label = 'Demented' if raw_pred_lr >= optimal_threshold else 'NonDemented'
+
             resultados["reporte_classificacao"] = (
                 f"Grupo Real: {group}\n"
-                f"Predição (Regressão Logística): {pred_lr_dem_label}\n"
-                f"Predição (XGBoost): {pred_xgb_dem_label}")
+                f"Predição (Regressão Linear): {pred_lr_dem_label} (Score Bruto: {raw_pred_lr:.4f}, Limiar: {optimal_threshold:.2f})")
 
-            X_idade = df_single[colunas_idade]
-            model_lr_age = joblib.load(MODEL_LR_IDADE_PATH)
+            # --- PARTE 2: REGRESSÃO RASO (XGBoost) ---
+            print("Executando predição de Regressão (XGBoost)...")
+            X_idade_xgb = df_single[features] 
+            
             model_xgb_age = joblib.load(MODEL_XGB_IDADE_PATH)
-            pred_lr_age = model_lr_age.predict(X_idade)[0]
-            pred_xgb_age = model_xgb_age.predict(X_idade)[0]
+            pred_xgb_age = model_xgb_age.predict(X_idade_xgb)[0]
             
             resultados["reporte_regressao"] = (
                 f"Idade Real: {age}\n"
-                f"Idade Predita (Regressão Linear): {pred_lr_age:.2f}\n"
-                f"Idade Predita (XGBoost): {pred_xgb_age:.2f}")
+                f"Idade Predita (XGBoost): {pred_xgb_age:.2f} anos")
 
             print("Executando predição (Deep Learning)...")
             prob_dl, label_dl = predict_single_classification_dl(caminho_arquivo)
@@ -752,6 +878,36 @@ class InterfaceGrafica(QMainWindow):
             msg_erro = f"Erro crítico durante o treinamento: {e}"
             print(msg_erro)
             return False, msg_erro
+            
+    # --- HANDLER PARA TREINAMENTO RASO (Adicionada) ---
+    def iniciar_treinamento_raso_handler(self):
+        confirmacao = QMessageBox.question(self, 
+            "Confirmação de Treinamento (Classificador Raso)", 
+            "Este processo irá treinar os modelos rasos (LR e XGBoost) com base nas features extraídas e nas divisões de dados existentes.\n\n"
+            "Deseja continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if confirmacao == QMessageBox.StandardButton.No:
+            self.barra_status.showMessage("Treinamento raso cancelado.", 5000)
+            return
+
+        self.barra_status.showMessage("Iniciando treinamento Raso... (verifique o console)")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents() 
+        
+        # Chama a função global de treino raso
+        sucesso, mensagem = iniciar_treinamento_raso() 
+        
+        QApplication.restoreOverrideCursor()
+        
+        if sucesso:
+            self.barra_status.showMessage("Treinamento Raso finalizado!", 10000)
+            QMessageBox.information(self, "Treinamento Concluído", mensagem)
+            self.visualizar_performance_shallow()
+        else:
+            QMessageBox.critical(self, "Erro no Treinamento Raso", mensagem)
+            self.barra_status.showMessage(f"Erro no treinamento raso: {mensagem}", 5000)
 
     
     def exec_segmentacao(self, image_slice, n_clusters=N_CLUSTERS, min_area_brain=MIN_AREA_BRAIN, min_area_ventricle=MIN_AREA_VENTRICLE, max_area_ventricle=MAX_AREA_VENTRICLE, center_tolerance_ratio=CENTER_TOLERANCE_RATIO):
@@ -1139,7 +1295,7 @@ class InterfaceGrafica(QMainWindow):
         layout_class_right.addWidget(QLabel("Curvas de Aprendizado (Treino/Val)"), 0, Qt.AlignmentFlag.AlignCenter)
         layout_class_right.addWidget(lbl_curves_dl, 1)
         layout_class.addLayout(layout_class_right)
-        abas.addTab(tab_classificacao, "Resultados da Classificação (Demência)")
+        abas.addTab(tab_classificacao, "Resultados da Classificação de Grupo")
         
         # Aba de regressão
         tab_regressao = QWidget()
@@ -1167,6 +1323,46 @@ class InterfaceGrafica(QMainWindow):
         self.load_image(lbl_scatter_dl, SCATTER_DL_IDADE_PATH)
         self.load_image(lbl_curves_reg_dl, CURVES_DL_IDADE_PATH)
         dialogo.exec()
+
+    # --- NOVO: VISUALIZADOR DE PERFORMANCE DO CLASSIFICADOR RASO ---
+    def visualizar_performance_shallow(self):
+        """
+        Exibe os gráficos de performance dos modelos de Classificação (LR)
+        e Regressão (XGBoost) do pipeline 'raso'.
+        """
+        dialogo = QDialog(self)
+        dialogo.setWindowTitle("Performance do Modelo (Classificador Raso)")
+        dialogo.setMinimumSize(1000, 700)
+        main_layout = QVBoxLayout(dialogo)
+        abas = QTabWidget()
+        main_layout.addWidget(abas, 1)
+
+        # Aba de classificação (LR)
+        tab_classificacao = QWidget()
+        layout_class = QVBoxLayout(tab_classificacao)
+        lbl_cm_shallow = QLabel("Matriz de Confusão (Regressão Linear com Limiar Otimizado)")
+        lbl_cm_shallow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout_class.addWidget(lbl_cm_shallow, 1)
+        abas.addTab(tab_classificacao, "Resultados da Classificação de Grupo")
+        
+        # Aba de regressão (XGBoost)
+        tab_regressao = QWidget()
+        layout_reg = QVBoxLayout(tab_regressao)
+        lbl_scatter_shallow = QLabel("Dispersão Idade Real vs. Prevista (XGBoost)")
+        lbl_scatter_shallow.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout_reg.addWidget(lbl_scatter_shallow, 1)
+        abas.addTab(tab_regressao, "Resultados da Regressão (Idade)")
+        
+        btn_fechar = QPushButton("Fechar")
+        btn_fechar.clicked.connect(dialogo.accept) 
+        main_layout.addWidget(btn_fechar, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # Carregar as imagens salvas
+        self.load_image(lbl_cm_shallow, CM_SHALLOW_PATH)
+        self.load_image(lbl_scatter_shallow, SCATTER_SHALLOW_PATH)
+        
+        dialogo.exec()
+    # -------------------------------------------------------------
 
     def load_image(self, label_widget, path_imgs):
         path_str = str(path_imgs)
@@ -1223,7 +1419,7 @@ class InterfaceGrafica(QMainWindow):
         # Preencher Tabela (Joblib)
         self.preencher_tabela(resultados["features_tabela"])
         
-        # Preencher Logs (Joblib)
+        # Preencher Logs (Classificador Raso)
         self.log_classificacao.setPlainText(resultados["reporte_classificacao"])
         self.log_regressao.setPlainText(resultados["reporte_regressao"])
         self.log_classificacao.moveCursor(QTextCursor.MoveOperation.Start)
@@ -1298,6 +1494,11 @@ if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(MODELS_DIR, exist_ok=True)
 
+    # Adicionar o seaborn para evitar erro de importação na função iniciar_treinamento_raso
+    try:
+        import seaborn as sns 
+    except ImportError:
+        print("Aviso: seaborn não instalado. O treinamento raso pode falhar.")
 
     app = QApplication(sys.argv)
     janela = InterfaceGrafica()
