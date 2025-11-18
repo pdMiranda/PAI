@@ -58,6 +58,23 @@ CURVES_DL_IDADE_PATH = OUTPUT_DIR / 'dl_regression_curves.png'
 CM_SHALLOW_PATH = OUTPUT_DIR / 'sl_cm_linear.png'
 SCATTER_SHALLOW_PATH = OUTPUT_DIR / 'sl_scatter_xgboost.png'
 
+SCATTER_MATRIX_PATH = OUTPUT_DIR / 'features_scatter.png'
+FEATURES_IDENTIFIERS_PATH = DB_ROOT / 'features_identifiers.csv' 
+FEATURES_TO_PLOT = [
+    'Ventricle_Area',
+    'Ventricle_Perimeter',
+    'Ventricle_Circularity',
+    'Ventricle_Eccentricity',
+    'Ventricle_Solidity',
+    'Ventricle_MajorAxisLength'
+]
+
+COR_MAP = {
+    'NonDemented': 'blue',
+    'Demented': 'red',
+    'Converted': 'black'
+}
+
 #semente para reprodutibilidade
 SEED = 42
 random.seed(SEED)
@@ -201,20 +218,26 @@ def carregar_df_csv():
     except FileNotFoundError:
         print(f"FATAL ERROR: Arquivo CSV não encontrado em {OASIS_CSV_PATH}")
         return None
+    
     df_oasis['Group'] = df_oasis['Group'].astype(str).str.strip()
     df_oasis = df_oasis[df_oasis['Group'].isin(['Nondemented', 'Demented', 'Converted'])].copy()
-    df_oasis['Group'] = df_oasis['Group'].replace({'Nondemented': 'NonDemented', 'Converted': 'Demented'})
+    
+    df_oasis['Group_DL'] = df_oasis['Group'].replace({'Nondemented': 'NonDemented', 'Converted': 'Demented'}).copy()
+    df_oasis['y'] = df_oasis['Group_DL'].map(CLASS_MAP)
+    
     df_oasis['MRI ID'] = df_oasis['MRI ID'].astype(str).str.strip()
-    df_oasis['y'] = df_oasis['Group'].map(CLASS_MAP)
     print(f"Verificando arquivos em:{AXL_DIR}")
     all_files = set(f.name for f in AXL_DIR.glob("*.nii.gz"))
     df_oasis['exists'] = df_oasis['MRI ID'].apply(lambda mid: f"{mid}_axl.nii.gz" in all_files)
     df_oasis = df_oasis[df_oasis['exists']].copy()
+    
     if df_oasis.empty:
         print(f"ERRO:Nenhum arquivo .nii.gz encontrado em {AXL_DIR} que corresponda ao arquivo CSV")
         return None
-    print(df_oasis['Group'].value_counts())
+        
+    print(df_oasis['Group_DL'].value_counts())
 
+    # Split estratificado usando 'Group_DL' (que trata Converted como Demented)
     trainval_df, test_df = train_test_split(
         df_oasis,
         test_size=0.2,
@@ -225,6 +248,11 @@ def carregar_df_csv():
         test_size=0.2,
         stratify=trainval_df['y'],
         random_state=SEED)
+    
+    train_df.rename(columns={'Group_DL': 'Group_DL_Target'}, inplace=True)
+    val_df.rename(columns={'Group_DL': 'Group_DL_Target'}, inplace=True)
+    test_df.rename(columns={'Group_DL': 'Group_DL_Target'}, inplace=True)
+    
     return train_df, val_df, test_df
 
 
@@ -233,10 +261,13 @@ def iniciar_treino_classificacao():
     data_split = carregar_df_csv()
     if data_split is None:
         return False, "Falha ao carregar dados para classsificação"
+    
     train_df, val_df, test_df = data_split
+
     train_paths = adicionar_paths(train_df, 'y')
     val_paths   = adicionar_paths(val_df, 'y')
     test_paths  = adicionar_paths(test_df, 'y')
+    
     train_ds = criar_dataset(train_paths, is_training=True)
     val_ds = criar_dataset(val_paths, is_training=False)
     test_ds = criar_dataset(test_paths, is_training=False)
@@ -394,7 +425,7 @@ def iniciar_treinamento_raso():
     caminho_teste = DB_ROOT / 'teste' / 'features_full.csv'
     
     # Mapeamento de classes e features
-    group_map = {'NonDemented': 0, 'Demented': 1} 
+    group_map = {'NonDemented': 0, 'Demented': 1, 'Converted': 1} # Mapeamento para classificação DL
     features = [
         'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 
         'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength'
@@ -403,10 +434,11 @@ def iniciar_treinamento_raso():
     def processar_csv(caminho):
         try:
             df = pd.read_csv(caminho, sep=';', decimal=',')
-            df['Group_Encoded'] = df['Group'].map(group_map)
+            # Usar 'Group' original, que foi mapeado para NonDemented/Demented/Converted no pipeline de preparação
+            df['Group_Encoded'] = df['Group'].map(group_map) 
             df = df.dropna(subset=['Group_Encoded'] + features)
             X = df[features]
-            y_class = df['Group_Encoded'] # Target Classificação de Grupo
+            y_class = df['Group_Encoded'] # Target Classificação de Grupo (0=NonDemented, 1=Demented/Converted)
             y_reg = df['Age']             # Target Regressão de Idade
             return X, y_class, y_reg
         except FileNotFoundError:
@@ -447,7 +479,7 @@ def iniciar_treinamento_raso():
         cm = confusion_matrix(y_class_test, class_predictions_test)
         fig, ax = plt.subplots(figsize=(6, 4))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax)
-        plt.title(f'Matriz de Confusão - LR (Limiar={best_threshold:.2f})')
+        plt.title(f'Matriz de Confusão - LR (Limiar: {best_threshold:.2f})')
         plt.ylabel('Real')
         plt.xlabel('Predito')
         plt.savefig(CM_SHALLOW_PATH, dpi=300, bbox_inches='tight')
@@ -492,7 +524,7 @@ def predict_single_classification_dl(nii_path):
         return 0.0, "Erro: Modelo não encontrado!!!"
 
     df_tmp = pd.DataFrame({"path": [nii_path], "y": [0]}) # 'y' é um placeholder
-    ds_tmp = criar_dataset(df_tmp, batch_size=1, is_training=False)
+    ds_tmp = criar_dataset(df_tmp, is_training=False)
     
     prob = model.predict(ds_tmp, verbose=0)[0, 0]
     pred_label_int = 1 if prob >= 0.5 else 0
@@ -509,12 +541,50 @@ def predict_single_age_dl(nii_path):
         return 0.0, 0.0
 
     df_tmp = pd.DataFrame({"path": [nii_path], "y": [0.0]}) # 'y' é um placeholder
-    ds_tmp = criar_dataset(df_tmp, batch_size=1, is_training=False)
+    ds_tmp = criar_dataset(df_tmp, is_training=False)
 
     age_norm = reg_model.predict(ds_tmp, verbose=0)[0, 0]
     age_real = (age_norm * (age_max - age_min)) + age_min
 
     return age_real, age_norm
+
+def generate_pairplot():
+    print("-- DEBUG -- Iniciando geração do Pairplot de Features...")
+    try:
+        df_full = pd.read_csv(FEATURES_IDENTIFIERS_PATH, sep=';', decimal=',')
+        
+        df_plot = df_full.dropna(subset=FEATURES_TO_PLOT).copy()
+        df_plot = df_plot[df_plot['Group'].isin(COR_MAP.keys())]
+
+        if df_plot.empty:
+            return False, f"ERRO: Nenhuma linha válida para plotar no arquivo: {FEATURES_IDENTIFIERS_PATH}"
+
+        sns.set(style="ticks")
+
+        g = sns.pairplot(
+            df_plot,
+            vars=FEATURES_TO_PLOT,
+            hue='Group',
+            palette=COR_MAP,
+            diag_kind='kde',
+            plot_kws={'alpha': 0.6, 's': 20}
+        )
+
+        g.fig.suptitle("Matriz de Dispersão de Features dos Ventrículos por Classe", y=1.03)
+
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        g.savefig(SCATTER_MATRIX_PATH)
+        plt.close(g.fig)
+        
+        print(f"Gráfico Pairplot salvo com sucesso em: {SCATTER_MATRIX_PATH}")
+        return True, "Gráfico Pairplot de Features gerado com sucesso."
+
+    except FileNotFoundError:
+        return False, f"ERRO: Arquivo {FEATURES_IDENTIFIERS_PATH} não encontrado. Execute 'Preparar base de dados'."
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, f"Erro ao gerar Pairplot: {e}"
 
 class InterfaceGrafica(QMainWindow):
     def __init__(self):
@@ -555,6 +625,10 @@ class InterfaceGrafica(QMainWindow):
         acao_visualizar = QAction("Visualizar graficos de treinamento (Deep Learning)", self)
         acao_visualizar.triggered.connect(self.visualizar_performance)
         menu_modelo.addAction(acao_visualizar)
+
+        acao_visualizar_matrix = QAction("Visualizar Matrix Features", self)
+        acao_visualizar_matrix.triggered.connect(self.visualizar_matrix_features)
+        menu_modelo.addAction(acao_visualizar_matrix)
 
     def load_barra_status(self):
         self.barra_status = QStatusBar()
@@ -706,6 +780,7 @@ class InterfaceGrafica(QMainWindow):
     def load_dataframe(self):
         try:
             df_oasis = pd.read_csv(OASIS_CSV_PATH, sep=';', decimal=',')
+            # Manter 'Converted' para o pairplot
             df_oasis['Group'] = df_oasis['Group'].map({
                 'Nondemented': 'NonDemented', 
                 'Demented': 'Demented', 
@@ -780,16 +855,20 @@ class InterfaceGrafica(QMainWindow):
             
             resultados["features_tabela"] = df_single[['Subject ID','MRI ID','Group','Age','Ventricle_Area','Ventricle_Perimeter','Ventricle_Circularity','Ventricle_Eccentricity','Ventricle_Solidity','Ventricle_MajorAxisLength']].copy()
 
-            # --- CLASSIFICAÇÃO RASO (Regressão Linear + Limiar Otimizado) ---
             print("Executando predição de Classificação (Regressão Linear)...")
             X_demencia_lr = df_single[features] 
             
-            model_lr_dem = joblib.load(MODEL_LR_DEMENCIA_PATH)
-            optimal_threshold = joblib.load(MODEL_LR_DEMENCIA_THRESHOLD_PATH) # Carrega o limiar ótimo
+            try:
+                model_lr_dem = joblib.load(MODEL_LR_DEMENCIA_PATH)
+                optimal_threshold = joblib.load(MODEL_LR_DEMENCIA_THRESHOLD_PATH)
+            except FileNotFoundError:
+                resultados["reporte_classificacao"] = "Erro: Modelos de Classificação Raso não encontrados. Execute o treinamento."
+                resultados["reporte_regressao"] = "Erro: Modelos de Regressão Raso não encontrados. Execute o treinamento."
+                resultados["reporte_classificacao_dl"] = "Erro: Modelos DL não encontrados. Execute o treinamento."
+                resultados["reporte_regressao_dl"] = "Erro: Modelos DL não encontrados. Execute o treinamento."
+                raise FileNotFoundError("Modelos rasos não encontrados.")
 
             raw_pred_lr = model_lr_dem.predict(X_demencia_lr)[0]
-            
-            # Aplica o limiar ótimo para obter a classificação final
             pred_lr_dem_label = 'Demented' if raw_pred_lr >= optimal_threshold else 'NonDemented'
 
             resultados["reporte_classificacao"] = (
@@ -807,6 +886,7 @@ class InterfaceGrafica(QMainWindow):
                 f"Idade Real: {age}\n"
                 f"Idade Predita (XGBoost): {pred_xgb_age:.2f} anos")
 
+            # --- Deep Learning ---
             print("Executando predição (Deep Learning)...")
             prob_dl, label_dl = predict_single_classification_dl(caminho_arquivo)
             age_dl, _ = predict_single_age_dl(caminho_arquivo)
@@ -819,7 +899,7 @@ class InterfaceGrafica(QMainWindow):
                 f"Idade Real: {age}\n"
                 f"Idade Predita (EfficientNet): {age_dl:.2f} anos")
 
-            #Gerar imagem segmentada
+            # Gerar imagem segmentada
             fig, ax = plt.subplots(figsize=(6,6), dpi=100)
             ax.imshow(image_slice, cmap='gray')
             ax.contour(ventricle_mask, levels=[0.5], colors='yellow', linewidths=1)
@@ -835,7 +915,7 @@ class InterfaceGrafica(QMainWindow):
             return resultados
             
         except FileNotFoundError as e:
-            return {"error": f"Modelo não encontrado: {e.filename}. Execute o treinamento."}
+            return {"error": f"Modelo não encontrado: {os.path.basename(str(e))}. Execute o treinamento."}
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -887,7 +967,6 @@ class InterfaceGrafica(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents() 
         
-        # Chama a função global de treino raso
         sucesso, mensagem = iniciar_treinamento_raso() 
         
         QApplication.restoreOverrideCursor()
@@ -937,12 +1016,12 @@ class InterfaceGrafica(QMainWindow):
         center_r, center_c = np.array(original_shape) / 2
         max_dist_r = original_shape[0] * center_tolerance_ratio
         max_dist_c = original_shape[1] * center_tolerance_ratio
+        is_central_r = lambda r: abs(r.centroid[0] - center_r) < max_dist_r
+        is_central_c = lambda r: abs(r.centroid[1] - center_c) < max_dist_c
+        
         for r in regioes_lcr:
             is_correct_size = r.area > min_area_ventricle and r.area < max_area_ventricle
-            centroid_r, centroid_c = r.centroid
-            is_central_r = abs(centroid_r - center_r) < max_dist_r
-            is_central_c = abs(centroid_c - center_c) < max_dist_c
-            is_central = is_central_r and is_central_c
+            is_central = is_central_r(r) and is_central_c(r)
             if is_correct_size and is_central:
                 mask_ventriculos_proc[labels_lcr == r.label] = True
         mask_ventriculos_proc = binary_fill_holes(mask_ventriculos_proc)
@@ -977,10 +1056,10 @@ class InterfaceGrafica(QMainWindow):
         features = {
             'Ventricle_Area': total_area,
             'Ventricle_Perimeter': total_perimeter,
-            'Ventricle_Circularity': np.mean(metrics_list['Circularity']),
-            'Ventricle_Eccentricity': np.mean(metrics_list['Eccentricity']),
-            'Ventricle_Solidity': np.mean(metrics_list['Solidity']),
-            'Ventricle_MajorAxisLength': np.mean(metrics_list['MajorAxisLength'])
+            'Ventricle_Circularity': np.mean(metrics_list['Circularity']) if metrics_list['Circularity'] else 0,
+            'Ventricle_Eccentricity': np.mean(metrics_list['Eccentricity']) if metrics_list['Eccentricity'] else 0,
+            'Ventricle_Solidity': np.mean(metrics_list['Solidity']) if metrics_list['Solidity'] else 0,
+            'Ventricle_MajorAxisLength': np.mean(metrics_list['MajorAxisLength']) if metrics_list['MajorAxisLength'] else 0
         }
         return features
 
@@ -1060,9 +1139,10 @@ class InterfaceGrafica(QMainWindow):
         confirmacao = QMessageBox.question(self, 
             "Confirmar Preparação da Base", 
             "Este processo irá:\n"
-            "1. Segmentar todas as imagens na pasta 'axl'.\n"
-            "2. Gerar novos arquivos 'features_full.csv'.\n"
-            "3. Dividir a base em pastas 'treino', 'teste' e 'validacao'.\n\n"
+            "1. Segmentar todas as imagens na pasta 'axl' e **Extrai Features**.\n"
+            "2. Gerar novos arquivos 'features_full.csv' e **'features_identifiers.csv'**.\n"
+            "3. Dividir a base em pastas 'treino', 'teste' e 'validacao'.\n"
+            "4. **Gerar o gráfico 'Matrix Features'**.\n\n"
             "Isso pode levar vários minutos e sobrescreverá arquivos existentes.\n"
             "Deseja continuar?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1077,13 +1157,28 @@ class InterfaceGrafica(QMainWindow):
         QApplication.processEvents()
 
         try:
+            # 1. Executar Pipeline de Dados
             sucesso, msg = self.executar_pipeline_dados()
+            
+            # 2. Gerar o pairplot
             if sucesso:
-                QMessageBox.information(self, "Sucesso", msg)
-                self.barra_status.showMessage("Base de dados preparada com sucesso!", 10000)
+                self.barra_status.showMessage("Base de dados preparada. Gerando Pairplot...")
+                QApplication.processEvents()
+                
+                sucesso_plot, msg_plot = generate_pairplot()
+                
+                if sucesso_plot:
+                    msg_final = f"{msg}\n\n{msg_plot}"
+                    QMessageBox.information(self, "Sucesso", msg_final)
+                    self.barra_status.showMessage("Base de dados e Pairplot gerados com sucesso!", 10000)
+                else:
+                    msg_final = f"{msg}\n\nFalha ao gerar Pairplot: {msg_plot}"
+                    QMessageBox.critical(self, "Aviso/Erro", msg_final)
+                    self.barra_status.showMessage("Base preparada, mas Pairplot falhou.", 10000)
             else:
                 QMessageBox.critical(self, "Erro", msg)
                 self.barra_status.showMessage("Erro ao preparar base.", 10000)
+                
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -1092,11 +1187,9 @@ class InterfaceGrafica(QMainWindow):
             QApplication.restoreOverrideCursor()
 
     def executar_pipeline_dados(self):
-        # --- Extração de features ---
         print("Iniciando extração de features em lote...")
         
         import glob
-        # Usando a variavel global AXL_DIR
         all_files = list(AXL_DIR.glob("*.nii.gz"))
         total_files = len(all_files)
         results_list = []
@@ -1106,7 +1199,6 @@ class InterfaceGrafica(QMainWindow):
 
         for i, file_path in enumerate(all_files):
             try:
-                # Nome base limpo
                 base_name = file_path.name.split('.')[0]
                 mr_id = base_name.replace('_axl', '').strip()
                 
@@ -1125,13 +1217,11 @@ class InterfaceGrafica(QMainWindow):
                     print(f"Ignorando {mr_id} (dimensão invalida).")
                     continue
                 
-                image_slice = np.rot90(image_slice) # Manter consistencia com a visualização
+                image_slice = np.rot90(image_slice)
 
-                # Reutiliza a função de segmentação existente da classe
                 seg_result = self.exec_segmentacao(image_slice)
                 ventricle_mask = seg_result['ventriculos']
                 
-                # Reutiliza a função de extração de features existente
                 features = self.extract_features(ventricle_mask)
                 features['MRI ID'] = mr_id
                 results_list.append(features)
@@ -1158,45 +1248,36 @@ class InterfaceGrafica(QMainWindow):
         # Merge
         df_final = pd.merge(df_demographic, df_features, on='MRI ID', how='left')
         
-        # Limpar Grupos (Lógica do notebook)
+        # Limpar Grupos (Lógica para o pairplot e split)
         def map_class_robusta(row):
             group = row['Group']
             cdr = row['CDR']
             if group == 'Converted':
-                if cdr > 0: return 'Demented'
-                else: return 'NonDemented'
+                return 'Converted' # Mantido 'Converted' para o pairplot
             if group == 'Demented': return 'Demented'
             return 'NonDemented'
 
         df_final['Group'] = df_final.apply(map_class_robusta, axis=1)
         
+        df_final['Group_DL'] = df_final['Group'].replace({'Converted': 'Demented'})
+        df_final['y'] = df_final['Group_DL'].map(CLASS_MAP)
+        
+        # Filtrar apenas os que tem imagem processada e grupos válidos
+        df_final = df_final[df_final['Ventricle_Area'].notna()] 
+        df_final = df_final[df_final['Group'].isin(COR_MAP.keys())]
+
         # Salvar CSVs intermediários
         features_full_path = DB_ROOT / 'features_full.csv'
-        features_ids_path = DB_ROOT / 'features_identifiers.csv'
+        
+        cols_pairplot = ['MRI ID', 'Group', 'Age'] + FEATURES_TO_PLOT
+        df_final[cols_pairplot].to_csv(FEATURES_IDENTIFIERS_PATH, index=False, sep=';', decimal=',')
         
         cols_full_requested = ['Subject ID', 'MRI ID', 'Group', 'Age', 'Ventricle_Area', 'Ventricle_Perimeter', 'Ventricle_Circularity', 'Ventricle_Eccentricity', 'Ventricle_Solidity', 'Ventricle_MajorAxisLength']
-        df_final = df_final[df_final['Ventricle_Area'].notna()] # Filtrar apenas os que tem imagem processada
         
-        df_final[cols_full_requested].to_csv(features_full_path, index=False, sep=';', decimal=',')
-        
-        print("Extração concluída. Iniciando Divisão (Split)...")
-
-        # --- Divisão da base ---
-        
-        # Diretórios de saída
-        TREINO_DIR = DB_ROOT / 'treino'
-        VAL_DIR = DB_ROOT / 'validacao'
-        TESTE_DIR = DB_ROOT / 'teste'
-        
-        for d in [TREINO_DIR / 'imgs', VAL_DIR / 'imgs', TESTE_DIR / 'imgs']:
-            os.makedirs(d, exist_ok=True)
-
-        # Lógica de split por paciente
         df_work = df_final.copy()
-        df_work['Group_num'] = df_work['Group'].map({'Demented': 1, 'NonDemented': 0})
         
-        # Agrupar por paciente para não vazar dados
-        patient_labels = df_work.groupby('Subject ID')['Group_num'].max()
+        # Agrupar por paciente
+        patient_labels = df_work.groupby('Subject ID')['y'].max()
         patient_ids = patient_labels.index
         labels = patient_labels.values
         
@@ -1204,9 +1285,18 @@ class InterfaceGrafica(QMainWindow):
         train_val_patients, test_patients, train_val_labels, _ = train_test_split(patient_ids, labels, test_size=0.2, stratify=labels, random_state=42)
         train_patients, val_patients, _, _ = train_test_split(train_val_patients, train_val_labels, test_size=0.2, stratify=train_val_labels, random_state=42)
 
+        # Diretórios de saída
+        TREINO_DIR = DB_ROOT / 'treino'
+        VAL_DIR = DB_ROOT / 'validacao'
+        TESTE_DIR = DB_ROOT / 'teste'
+        
+        for d in [TREINO_DIR / 'imgs', VAL_DIR / 'imgs', TESTE_DIR / 'imgs']:
+            shutil.rmtree(d, ignore_errors=True) # Limpar antes
+            os.makedirs(d, exist_ok=True)
+
         # Função auxiliar para salvar e copiar
-        def processar_subset(patients_list, output_folder):
-            subset_df = df_work[df_work['Subject ID'].isin(patients_list)].copy()
+        def processar_subset(patients_list, output_folder, df_base):
+            subset_df = df_base[df_base['Subject ID'].isin(patients_list)].copy()
             
             # Salvar CSVs do subset
             subset_df[cols_full_requested].to_csv(output_folder / 'features_full.csv', index=False, sep=';', decimal=',')
@@ -1216,23 +1306,23 @@ class InterfaceGrafica(QMainWindow):
             count = 0
             for _, row in subset_df.iterrows():
                 mri_id = row['MRI ID']
-                # Procurar arquivo original
                 orig_file = list(AXL_DIR.glob(f"*{mri_id}*.nii.gz"))
                 if orig_file:
                     shutil.copy(orig_file[0], dest_img_dir / orig_file[0].name)
                     count += 1
             return count
 
-        c_train = processar_subset(train_patients, TREINO_DIR)
-        c_val = processar_subset(val_patients, VAL_DIR)
-        c_test = processar_subset(test_patients, TESTE_DIR)
+        c_train = processar_subset(train_patients, TREINO_DIR, df_work)
+        c_val = processar_subset(val_patients, VAL_DIR, df_work)
+        c_test = processar_subset(test_patients, TESTE_DIR, df_work)
 
         return True, (f"Processamento concluído!\n\n"
                       f"Imagens processadas: {len(df_final)}\n"
                       f"Treino: {c_train} imgs ({len(train_patients)} pacientes)\n"
                       f"Validação: {c_val} imgs ({len(val_patients)} pacientes)\n"
                       f"Teste: {c_test} imgs ({len(test_patients)} pacientes)\n\n"
-                      f"Arquivos salvos em: {DB_ROOT}")
+                      f"Arquivos CSV e imagens divididos em: {DB_ROOT}")
+
 
     def iniciar_treinamento(self):
         confirmacao = QMessageBox.question(self, 
@@ -1313,7 +1403,6 @@ class InterfaceGrafica(QMainWindow):
         self.load_image(lbl_curves_reg_dl, CURVES_DL_IDADE_PATH)
         dialogo.exec()
 
-    # --- NOVO: VISUALIZADOR DE PERFORMANCE DO CLASSIFICADOR RASO ---
     def visualizar_performance_shallow(self):
         """
         Exibe os gráficos de performance dos modelos de Classificação (LR)
@@ -1351,14 +1440,46 @@ class InterfaceGrafica(QMainWindow):
         self.load_image(lbl_scatter_shallow, SCATTER_SHALLOW_PATH)
         
         dialogo.exec()
-    # -------------------------------------------------------------
+        
+    def visualizar_matrix_features(self):
+        """
+        Exibe a matriz de dispersão de features (Pairplot) gerada após
+        a preparação da base de dados.
+        """
+        dialogo = QDialog(self)
+        dialogo.setWindowTitle("Visualizar Matriz de Features")
+        dialogo.setMinimumSize(1000, 700)
+        main_layout = QVBoxLayout(dialogo)
+
+        lbl_pairplot = QLabel("Matriz de Dispersão de Features dos Ventrículos por Classe")
+        lbl_pairplot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_pairplot.setStyleSheet("font-weight: bold;")
+        main_layout.addWidget(lbl_pairplot, 0, Qt.AlignmentFlag.AlignCenter)
+
+        lbl_image = QLabel()
+        lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(lbl_image, 1)
+        
+        btn_fechar = QPushButton("Fechar")
+        btn_fechar.clicked.connect(dialogo.accept) 
+        main_layout.addWidget(btn_fechar, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # Carregar a imagem Pairplot
+        self.load_image(lbl_image, SCATTER_MATRIX_PATH) 
+        
+        dialogo.exec()
 
     def load_image(self, label_widget, path_imgs):
         path_str = str(path_imgs)
         pixmap = QPixmap(path_str)
         if pixmap.isNull():
             pixmap = self.criar_box_img_nao_encontrada(path_str)
-        label_widget.setPixmap(pixmap.scaled(600,500,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+        
+        # Ajustar o tamanho máximo para preencher o diálogo, mas manter proporção
+        max_width = 1000 if isinstance(label_widget.parent(), QDialog) else 600
+        max_height = 650 if isinstance(label_widget.parent(), QDialog) else 500
+        
+        label_widget.setPixmap(pixmap.scaled(max_width, max_height, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
     def criar_box_img_nao_encontrada(self, path_str):
         pixmap = QPixmap(600, 500)
@@ -1366,7 +1487,7 @@ class InterfaceGrafica(QMainWindow):
         painter = QPainter(pixmap)
         painter.setPen(QColor(200, 0, 0))
         painter.setFont(QFont("Arial", 10))
-        text = f"Imagem não encontrada.\n\nExecute o treinamento para gerar o gráfico:\n{os.path.basename(path_str)}"
+        text = f"Imagem não encontrada.\n\nExecute 'Preparar base de dados' para gerar o gráfico:\n{os.path.basename(path_str)}"
         painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, text)
         painter.end()
         return pixmap
